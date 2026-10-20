@@ -15,14 +15,17 @@ done when its criteria pass, not when its code merely compiles.
 - [x] Pipeline planning: filter strings, two-pass stabilization plan,
   export argument vectors (golden-tested)
 - [x] `reeldeck inspect` report surface (JSON/HTML) over a sampled range
-- [ ] Export-log writer wired to real runs
+- [x] Export-log writer wired to real runs (`rd-run` writes the
+  recipe + export-log sidecars beside every executed output)
 
 ## v0.2 — First restoration chain
 
-- Deinterlace (bwdif/yadif) executed end to end from a recipe
-- Segment preview (operator-chosen worst segment) + before/after compare
-- Preservation (FFV1/Matroska) + Mezzanine + Access exports
-- GUI shell: queue, viewer, timeline graphs, frame-step to anomaly
+- [x] Deinterlace (bwdif/yadif) executed end to end from a recipe
+  (`reeldeck export`)
+- [x] Segment preview (operator-chosen segment) via
+  `reeldeck preview` (before/after compare lands with the GUI shell)
+- [x] Preservation (FFV1/Matroska) + Mezzanine + Access exports
+- [ ] GUI shell: queue, viewer, timeline graphs, frame-step to anomaly
 
 ## v0.3 — The difficult-footage release
 

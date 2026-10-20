@@ -62,6 +62,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rd-run"
+version = "0.1.0"
+dependencies = [
+ "rd-analyze",
+ "rd-core",
+ "rd-pipeline",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "rd-ui"
 version = "0.1.0"
 dependencies = [
@@ -78,6 +90,7 @@ dependencies = [
  "rd-analyze",
  "rd-core",
  "rd-pipeline",
+ "rd-run",
  "serde_json",
 ]
 

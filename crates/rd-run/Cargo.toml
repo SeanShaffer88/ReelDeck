@@ -1,0 +1,18 @@
+[package]
+name = "rd-run"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ReelDeck render execution: runs export plans with FFmpeg, streams measured progress, and writes the recipe + export-log proof beside every output. The only crate that executes renders."
+
+[dependencies]
+rd-core = { path = "../rd-core", version = "0.1.0" }
+rd-pipeline = { path = "../rd-pipeline", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rd-analyze = { path = "../rd-analyze", version = "0.1.0" }

@@ -9,11 +9,18 @@
 //!                                    file and print a report (text by
 //!                                    default; --json / --html <file>)
 //!   reeldeck plan <recipe.json>   Print the export plan for a recipe
+//!   reeldeck export <recipe.json> Render a recipe end to end; the
+//!                                 output ships with its recipe and
+//!                                 export-log sidecars
+//!   reeldeck preview <recipe.json> --start <s> --duration <s>
+//!                                 Render one segment of a recipe
 //!   reeldeck hash <file>          Print the file's SHA-256
 //!   reeldeck version              Print the version
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -25,6 +32,8 @@ fn main() -> ExitCode {
         Some("hash") => cmd_hash(&args[1..]),
         Some("inspect") => cmd_inspect(&args[1..]),
         Some("plan") => cmd_plan(&args[1..]),
+        Some("export") => cmd_export(&args[1..]),
+        Some("preview") => cmd_preview(&args[1..]),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_usage();
             0
@@ -49,6 +58,13 @@ fn print_usage() {
          \x20                               machine-readable report, --html <file> also writes a\n\
          \x20                               standalone HTML report to a NEW file)\n\
          \x20 reeldeck plan <recipe.json>   Print the export plan (argument vector) for a recipe\n\
+         \x20 reeldeck export <recipe.json> [--in <file>] [--out <file>]\n\
+         \x20                               Render a recipe end to end. The output is a NEW\n\
+         \x20                               file and ships with <out>.recipe.json and\n\
+         \x20                               <out>.export-log.json beside it\n\
+         \x20 reeldeck preview <recipe.json> --start <secs> --duration <secs> [--in <file>] [--out <file>]\n\
+         \x20                               Render one segment of a recipe (same sidecars;\n\
+         \x20                               the segment is recorded in the recipe notes)\n\
          \x20 reeldeck hash <file>          Print the file's SHA-256\n\
          \x20 reeldeck version              Print the version"
     );
@@ -607,6 +623,232 @@ fn cmd_plan(args: &[String]) -> i32 {
     }
 }
 
+const EXPORT_USAGE: &str = "reeldeck export <recipe.json> [--in <file>] [--out <file>]";
+const PREVIEW_USAGE: &str = "reeldeck preview <recipe.json> --start <secs> --duration <secs> \
+                             [--in <file>] [--out <file>]";
+
+/// Shared flag surface of `export` and `preview`.
+struct RunArgs {
+    recipe_path: PathBuf,
+    input: Option<PathBuf>,
+    output: Option<PathBuf>,
+    start: Option<f64>,
+    duration: Option<f64>,
+}
+
+fn parse_run_args(args: &[String], usage: &str, cmd: &str) -> Result<RunArgs, u8> {
+    let mut out = RunArgs {
+        recipe_path: PathBuf::new(),
+        input: None,
+        output: None,
+        start: None,
+        duration: None,
+    };
+    let mut have_recipe = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        let value = |i: &mut usize| -> Result<String, u8> {
+            *i += 1;
+            args.get(*i).cloned().ok_or_else(|| {
+                eprintln!("reeldeck {cmd}: missing value for {arg}");
+                eprintln!("usage: {usage}");
+                2u8
+            })
+        };
+        match arg.as_str() {
+            "--in" => out.input = Some(PathBuf::from(value(&mut i)?)),
+            "--out" => out.output = Some(PathBuf::from(value(&mut i)?)),
+            "--start" => {
+                let v = value(&mut i)?;
+                out.start = Some(parse_number_flag(cmd, "--start", &v, usage)?);
+            }
+            "--duration" => {
+                let v = value(&mut i)?;
+                out.duration = Some(parse_number_flag(cmd, "--duration", &v, usage)?);
+            }
+            flag if flag.starts_with("--") => {
+                eprintln!("reeldeck {cmd}: unknown flag '{flag}'");
+                eprintln!("usage: {usage}");
+                return Err(2);
+            }
+            _ => {
+                if have_recipe {
+                    eprintln!("reeldeck {cmd}: unexpected extra argument '{arg}'");
+                    eprintln!("usage: {usage}");
+                    return Err(2);
+                }
+                out.recipe_path = PathBuf::from(arg);
+                have_recipe = true;
+            }
+        }
+        i += 1;
+    }
+    if !have_recipe {
+        eprintln!("usage: {usage}");
+        return Err(2);
+    }
+    Ok(out)
+}
+
+fn parse_number_flag(cmd: &str, flag: &str, raw: &str, usage: &str) -> Result<f64, u8> {
+    raw.parse::<f64>().map_err(|_| {
+        eprintln!("reeldeck {cmd}: {flag} expects a number, got '{raw}'");
+        eprintln!("usage: {usage}");
+        2u8
+    })
+}
+
+fn load_recipe(cmd: &str, path: &Path) -> Result<rd_core::Recipe, i32> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("reeldeck {cmd}: cannot read {}: {e}", path.display());
+            return Err(1);
+        }
+    };
+    rd_core::Recipe::from_json(&text).map_err(|e| {
+        eprintln!(
+            "reeldeck {cmd}: {} is not a valid recipe: {e}",
+            path.display()
+        );
+        1
+    })
+}
+
+/// Run one render (export or preview plan) and report it the same way
+/// for both: one line per measured progress block while it runs; the
+/// output, its hash, and the proof sidecars when it lands; the plain
+/// error — and the export log's path, when one was written — when it
+/// does not.
+fn execute_run(
+    cmd: &str,
+    recipe: &rd_core::Recipe,
+    input: &Path,
+    output: &Path,
+    preview_plan: Option<rd_pipeline::ExportPlan>,
+) -> i32 {
+    let opts = rd_run::RunOptions {
+        cancel: Arc::new(AtomicBool::new(false)),
+        on_progress: Some(Box::new(|p: &rd_run::Progress| {
+            println!("frame {}  fps {:.1}  speed {:.2}x", p.frame, p.fps, p.speed);
+        })),
+    };
+    let result = match preview_plan {
+        Some(plan) => rd_run::run_plan(plan, recipe, input, output, opts),
+        None => rd_run::run_export(recipe, input, output, opts),
+    };
+    match result {
+        Ok(report) => {
+            println!("Output: {}", report.output.display());
+            println!("SHA-256: {}", report.output_sha256);
+            println!("Recipe: {}", report.recipe_path.display());
+            println!("Export log: {}", report.log_path.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("reeldeck {cmd}: {e}");
+            // A RenderFailed/Cancelled return means the failure proof
+            // was written (a sidecar failure would have replaced the
+            // error with SidecarFailed), so its path can be named.
+            if matches!(
+                e,
+                rd_run::RunError::RenderFailed { .. } | rd_run::RunError::Cancelled
+            ) {
+                let (_, log_path) = rd_run::sidecar_paths(output);
+                eprintln!("reeldeck {cmd}: export log: {}", log_path.display());
+            }
+            1
+        }
+    }
+}
+
+fn cmd_export(args: &[String]) -> i32 {
+    let parsed = match parse_run_args(args, EXPORT_USAGE, "export") {
+        Ok(p) => p,
+        Err(c) => return c as i32,
+    };
+    if parsed.start.is_some() || parsed.duration.is_some() {
+        eprintln!("reeldeck export: --start/--duration belong to preview, not export");
+        eprintln!("usage: {EXPORT_USAGE}");
+        return 2;
+    }
+    let recipe = match load_recipe("export", &parsed.recipe_path) {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+    let input = parsed
+        .input
+        .unwrap_or_else(|| PathBuf::from(&recipe.source_name));
+    let output = parsed.output.unwrap_or_else(|| {
+        PathBuf::from(derived_output_path(
+            &recipe.source_name,
+            recipe.export_preset,
+        ))
+    });
+    execute_run("export", &recipe, &input, &output, None)
+}
+
+fn cmd_preview(args: &[String]) -> i32 {
+    let parsed = match parse_run_args(args, PREVIEW_USAGE, "preview") {
+        Ok(p) => p,
+        Err(c) => return c as i32,
+    };
+    let (start, duration) = match (parsed.start, parsed.duration) {
+        (Some(s), Some(d)) if s.is_finite() && s >= 0.0 && d.is_finite() && d > 0.0 => (s, d),
+        _ => {
+            eprintln!(
+                "reeldeck preview: --start (non-negative) and --duration (positive) are both required"
+            );
+            eprintln!("usage: {PREVIEW_USAGE}");
+            return 2;
+        }
+    };
+    let recipe = match load_recipe("preview", &parsed.recipe_path) {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+    let input = parsed
+        .input
+        .unwrap_or_else(|| PathBuf::from(&recipe.source_name));
+    let output = parsed
+        .output
+        .unwrap_or_else(|| PathBuf::from(preview_output_path(&input, recipe.export_preset)));
+    // The recipe the run records is a clone whose notes carry the
+    // segment — appended to the operator's notes, never replacing
+    // them — so the sidecars show this was a preview, and of what.
+    let mut preview_recipe = recipe.clone();
+    if !preview_recipe.notes.is_empty() {
+        preview_recipe.notes.push('\n');
+    }
+    preview_recipe.notes.push_str(&format!(
+        "preview segment: start={start}s duration={duration}s (from recipe notes appended by reeldeck preview)"
+    ));
+    let plan = match rd_pipeline::preview_plan(
+        &preview_recipe,
+        &input.to_string_lossy(),
+        &output.to_string_lossy(),
+        start,
+        duration,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("reeldeck preview: {e}");
+            return 1;
+        }
+    };
+    execute_run("preview", &preview_recipe, &input, &output, Some(plan))
+}
+
+/// `clip.mkv` + PreservationMaster -> `clip.preview.mkv`.
+fn preview_output_path(input: &Path, preset: rd_core::ExportPreset) -> String {
+    let stem = input
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    format!("{stem}.preview.{}", preset.extension())
+}
+
 /// `capture.mkv` + PreservationMaster -> `capture.restored.mkv`.
 fn derived_output_path(source_name: &str, preset: rd_core::ExportPreset) -> String {
     let stem = Path::new(source_name)
@@ -776,6 +1018,21 @@ mod tests {
                 "{bad:?} must be a usage error"
             );
         }
+    }
+
+    #[test]
+    fn preview_output_names_follow_preset() {
+        assert_eq!(
+            preview_output_path(
+                Path::new("clip.mkv"),
+                rd_core::ExportPreset::PreservationMaster
+            ),
+            "clip.preview.mkv"
+        );
+        assert_eq!(
+            preview_output_path(Path::new("clip.mp4"), rd_core::ExportPreset::Access),
+            "clip.preview.mp4"
+        );
     }
 
     #[test]

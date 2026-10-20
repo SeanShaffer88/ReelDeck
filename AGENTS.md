@@ -15,7 +15,7 @@ and automated contributors alike.
 ## Engineering standards
 
 - Safe Rust. `unsafe` is forbidden in `rd-core`, `rd-analyze`,
-  `rd-pipeline`, and `rd-ui` (`#![forbid(unsafe_code)]`); any future
+  `rd-pipeline`, `rd-run`, and `rd-ui` (`#![forbid(unsafe_code)]`); any future
   platform/FFI crate must scope `unsafe` narrowly, with each block
   commented with its invariants, and justify its existence first.
 - Small, reputable dependency set; stdlib first. The workspace currently
@@ -23,7 +23,8 @@ and automated contributors alike.
   requires a written justification in the change description.
 - Pure logic goes in `rd-core` with unit tests. Parsing goes in
   `rd-analyze`. Pipeline planning goes in `rd-pipeline` and never executes
-  a process. The UI holds state and presentation, no business logic.
+  a process. Process execution for renders lives in `rd-run` only. The UI
+  holds state and presentation, no business logic.
 - Long-running work runs off the UI thread and is cancellable. Progress
   reported to the user is measured, never fabricated.
 - Local data only, offline-first. No networking, no telemetry, no accounts

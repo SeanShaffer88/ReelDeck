@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- First executed renders: new `rd-run` crate (the only crate that
+  executes renders; `rd-pipeline` still plans only) and the
+  `reeldeck export` / `reeldeck preview` subcommands. A run gates on
+  source fixity (a recipe's pinned SHA-256 must match the input),
+  refuses any output or sidecar path that already exists (the
+  executed command also carries FFmpeg's never-overwrite flag),
+  streams measured `-progress` blocks to the operator, supports
+  cooperative cancellation, runs the two-pass stabilization
+  analysis when a recipe needs it (reusing an existing transforms
+  file, recorded in the log), and on failure deletes its partial
+  output while still writing the proof with `success = false`.
+- Export-log writer wired to real runs: every executed export and
+  preview writes `<output>.recipe.json` (the recipe as executed;
+  previews record their segment in its notes) and
+  `<output>.export-log.json` (the exact executed argument vector,
+  FFmpeg version, source/output SHA-256, frame counts including
+  dropped/duplicated, warnings, timestamps) beside the output.
+- `rd-pipeline::preview_plan`: segment plans with input seeking.
+  Stabilization chains are refused a segment preview — their
+  analysis pass must see the whole input, so a segment render
+  would not show what the full render will do.
 - `reeldeck inspect` report surface over a sampled range
   (`--start` / `--duration` / `--tout`): plain-text report by default,
   the full report as JSON with `--json`, and a standalone HTML report
@@ -39,3 +60,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `reeldeck` CLI: `inspect`, `plan`, `hash`, and `version` subcommands.
 - Project documentation: README, AGENTS.md working agreements, roadmap,
   and the Architecture & UX Plan as the design contract.
+
+### Fixed
+
+- Stabilization analysis plan (`vidstabdetect`) aborted outright on
+  multi-plane RGB sources (e.g. FFV1 preservation captures) — found
+  the first time the plan was executed for real. The analysis pass
+  now converts to `yuv420p` for measurement only; the export chain
+  that reaches the output is unchanged.
+- The stabilization transforms file was planned with double quotes
+  (`result="transforms.trf"`), which FFmpeg's filter parser treats
+  as literal characters — runs created a file actually named
+  `"transforms.trf"`, and existence checks for `transforms.trf`
+  never matched. The plan now names it unquoted (it is this
+  workspace's own constant, with no filter-special characters).
