@@ -14,6 +14,11 @@
 //!                                 export-log sidecars
 //!   reeldeck preview <recipe.json> --start <s> --duration <s>
 //!                                 Render one segment of a recipe
+//!   reeldeck verify <output>      Check an export against the proof
+//!                                 it shipped with (its sidecars)
+//!   reeldeck rerun <log.json>     Re-run a recorded export's recipe
+//!                                 and compare the new output's hash
+//!                                 with the recorded one
 //!   reeldeck hash <file>          Print the file's SHA-256
 //!   reeldeck version              Print the version
 
@@ -34,6 +39,8 @@ fn main() -> ExitCode {
         Some("plan") => cmd_plan(&args[1..]),
         Some("export") => cmd_export(&args[1..]),
         Some("preview") => cmd_preview(&args[1..]),
+        Some("verify") => cmd_verify(&args[1..]),
+        Some("rerun") => cmd_rerun(&args[1..]),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_usage();
             0
@@ -65,6 +72,18 @@ fn print_usage() {
          \x20 reeldeck preview <recipe.json> --start <secs> --duration <secs> [--in <file>] [--out <file>]\n\
          \x20                               Render one segment of a recipe (same sidecars;\n\
          \x20                               the segment is recorded in the recipe notes)\n\
+         \x20 reeldeck verify <output-file> [--json]\n\
+         \x20                               Check an export against its sidecars: recorded\n\
+         \x20                               run, output hash, source hash, preset, schema.\n\
+         \x20                               Checks whose evidence is missing are SKIP,\n\
+         \x20                               never PASS\n\
+         \x20 reeldeck rerun <export-log.json> [--in <file>] [--out <file>]\n\
+         \x20                               Re-run a recorded export's recipe beside a\n\
+         \x20                               NEW output (<stem>.rerun.<ext> by default) and\n\
+         \x20                               report how it compares to the recorded run:\n\
+         \x20                               file bytes first, then the elementary\n\
+         \x20                               streams, so container metadata is not\n\
+         \x20                               mistaken for a changed picture\n\
          \x20 reeldeck hash <file>          Print the file's SHA-256\n\
          \x20 reeldeck version              Print the version"
     );
@@ -720,14 +739,15 @@ fn load_recipe(cmd: &str, path: &Path) -> Result<rd_core::Recipe, i32> {
 /// for both: one line per measured progress block while it runs; the
 /// output, its hash, and the proof sidecars when it lands; the plain
 /// error — and the export log's path, when one was written — when it
-/// does not.
-fn execute_run(
+/// does not. Returns the run report on success so callers (rerun)
+/// can compare what was produced; the error is the exit code.
+fn run_render(
     cmd: &str,
     recipe: &rd_core::Recipe,
     input: &Path,
     output: &Path,
     preview_plan: Option<rd_pipeline::ExportPlan>,
-) -> i32 {
+) -> Result<rd_run::RunReport, i32> {
     let opts = rd_run::RunOptions {
         cancel: Arc::new(AtomicBool::new(false)),
         on_progress: Some(Box::new(|p: &rd_run::Progress| {
@@ -744,7 +764,7 @@ fn execute_run(
             println!("SHA-256: {}", report.output_sha256);
             println!("Recipe: {}", report.recipe_path.display());
             println!("Export log: {}", report.log_path.display());
-            0
+            Ok(report)
         }
         Err(e) => {
             eprintln!("reeldeck {cmd}: {e}");
@@ -758,8 +778,23 @@ fn execute_run(
                 let (_, log_path) = rd_run::sidecar_paths(output);
                 eprintln!("reeldeck {cmd}: export log: {}", log_path.display());
             }
-            1
+            Err(1)
         }
+    }
+}
+
+/// [`run_render`] as an exit code, for the subcommands that need
+/// nothing beyond the rendered output (export, preview).
+fn execute_run(
+    cmd: &str,
+    recipe: &rd_core::Recipe,
+    input: &Path,
+    output: &Path,
+    preview_plan: Option<rd_pipeline::ExportPlan>,
+) -> i32 {
+    match run_render(cmd, recipe, input, output, preview_plan) {
+        Ok(_) => 0,
+        Err(code) => code,
     }
 }
 
@@ -838,6 +873,558 @@ fn cmd_preview(args: &[String]) -> i32 {
         }
     };
     execute_run("preview", &preview_recipe, &input, &output, Some(plan))
+}
+
+const VERIFY_USAGE: &str = "reeldeck verify <output-file> [--json]";
+const RERUN_USAGE: &str = "reeldeck rerun <export-log.json> [--in <file>] [--out <file>]";
+
+/// Find `name` as given (the caller's working directory), then beside
+/// `anchor_dir` (the directory of a related file — the output being
+/// verified, or the log being re-run). Sidecars and their media are
+/// moved together, so the directory of the file in hand is the
+/// natural second place to look. Returns the path found and the
+/// paths tried (so a miss can be reported honestly).
+fn resolve_beside(name: &str, anchor_dir: Option<&Path>) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let direct = PathBuf::from(name);
+    let mut tried = vec![direct.clone()];
+    if direct.exists() {
+        return (Some(direct), tried);
+    }
+    if let Some(dir) = anchor_dir {
+        if !dir.as_os_str().is_empty() {
+            let alt = dir.join(name);
+            if alt != tried[0] {
+                tried.push(alt.clone());
+                if alt.exists() {
+                    return (Some(alt), tried);
+                }
+            }
+            // The name may itself carry a directory from elsewhere;
+            // its bare file name beside the anchor is worth one try.
+            if let Some(file_name) = Path::new(name).file_name() {
+                let by_name = dir.join(file_name);
+                if !tried.contains(&by_name) {
+                    tried.push(by_name.clone());
+                    if by_name.exists() {
+                        return (Some(by_name), tried);
+                    }
+                }
+            }
+        }
+    }
+    (None, tried)
+}
+
+/// The directory a path lives in, for [`resolve_beside`] anchors.
+fn parent_dir(path: &Path) -> Option<&Path> {
+    path.parent().filter(|p| !p.as_os_str().is_empty())
+}
+
+fn parse_verify_args(args: &[String]) -> Result<(PathBuf, bool), u8> {
+    let mut path: Option<PathBuf> = None;
+    let mut json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            flag if flag.starts_with("--") => {
+                eprintln!("reeldeck verify: unknown flag '{flag}'");
+                eprintln!("usage: {VERIFY_USAGE}");
+                return Err(2);
+            }
+            _ => {
+                if path.is_some() {
+                    eprintln!("reeldeck verify: unexpected extra argument '{arg}'");
+                    eprintln!("usage: {VERIFY_USAGE}");
+                    return Err(2);
+                }
+                path = Some(PathBuf::from(arg));
+            }
+        }
+    }
+    match path {
+        Some(p) => Ok((p, json)),
+        None => {
+            eprintln!("usage: {VERIFY_USAGE}");
+            Err(2)
+        }
+    }
+}
+
+struct RerunArgs {
+    log_path: PathBuf,
+    input: Option<PathBuf>,
+    output: Option<PathBuf>,
+}
+
+fn parse_rerun_args(args: &[String]) -> Result<RerunArgs, u8> {
+    let mut out = RerunArgs {
+        log_path: PathBuf::new(),
+        input: None,
+        output: None,
+    };
+    let mut have_log = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        let value = |i: &mut usize| -> Result<String, u8> {
+            *i += 1;
+            args.get(*i).cloned().ok_or_else(|| {
+                eprintln!("reeldeck rerun: missing value for {arg}");
+                eprintln!("usage: {RERUN_USAGE}");
+                2u8
+            })
+        };
+        match arg.as_str() {
+            "--in" => out.input = Some(PathBuf::from(value(&mut i)?)),
+            "--out" => out.output = Some(PathBuf::from(value(&mut i)?)),
+            flag if flag.starts_with("--") => {
+                eprintln!("reeldeck rerun: unknown flag '{flag}'");
+                eprintln!("usage: {RERUN_USAGE}");
+                return Err(2);
+            }
+            _ => {
+                if have_log {
+                    eprintln!("reeldeck rerun: unexpected extra argument '{arg}'");
+                    eprintln!("usage: {RERUN_USAGE}");
+                    return Err(2);
+                }
+                out.log_path = PathBuf::from(arg);
+                have_log = true;
+            }
+        }
+        i += 1;
+    }
+    if !have_log {
+        eprintln!("usage: {RERUN_USAGE}");
+        return Err(2);
+    }
+    Ok(out)
+}
+
+/// Read and parse one of an export's sidecars. A sidecar that cannot
+/// be read or parsed is reported as what it is: a corrupt proof is a
+/// failed verification/rerun, never a shrug.
+fn load_sidecar<T>(
+    cmd: &str,
+    kind: &str,
+    path: &Path,
+    parse: impl Fn(&str) -> Result<T, serde_json::Error>,
+) -> Result<T, i32> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("reeldeck {cmd}: cannot read {kind} {}: {e}", path.display());
+            return Err(1);
+        }
+    };
+    parse(&text).map_err(|e| {
+        eprintln!(
+            "reeldeck {cmd}: {} is not a valid {kind}: {e}",
+            path.display()
+        );
+        1
+    })
+}
+
+fn cmd_verify(args: &[String]) -> i32 {
+    let (output, json) = match parse_verify_args(args) {
+        Ok(v) => v,
+        Err(c) => return c as i32,
+    };
+    if !output.exists() {
+        eprintln!(
+            "reeldeck verify: output file does not exist: {}",
+            output.display()
+        );
+        return 1;
+    }
+    let (recipe_path, log_path) = rd_run::sidecar_paths(&output);
+    for sidecar in [&recipe_path, &log_path] {
+        if !sidecar.exists() {
+            eprintln!(
+                "reeldeck verify: missing sidecar {} — an export without its proof cannot be verified",
+                sidecar.display()
+            );
+            return 1;
+        }
+    }
+    let log = match load_sidecar(
+        "verify",
+        "export log",
+        &log_path,
+        rd_core::ExportLog::from_json,
+    ) {
+        Ok(l) => l,
+        Err(c) => return c,
+    };
+    let recipe = match load_sidecar("verify", "recipe", &recipe_path, rd_core::Recipe::from_json) {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+    let output_hash = match rd_core::sha256_file(&output) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("reeldeck verify: cannot hash {}: {e}", output.display());
+            return 1;
+        }
+    };
+    // The source is where the recipe says it was; when the whole
+    // set was moved, it sits beside the output. A source that is
+    // nowhere to be found makes the source check SKIP (reported by
+    // the check itself) — it never fails or passes sight unseen.
+    let (source_found, source_tried) = resolve_beside(&recipe.source_name, parent_dir(&output));
+    let source_hash = source_found
+        .as_ref()
+        .and_then(|p| rd_core::sha256_file(p).ok());
+    let report = rd_core::verify_export(
+        &log,
+        &recipe,
+        source_hash.as_deref(),
+        Some(output_hash.as_str()),
+    );
+    if json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(j) => println!("{j}"),
+            Err(e) => {
+                eprintln!("reeldeck verify: cannot serialize result: {e}");
+                return 1;
+            }
+        }
+    } else {
+        println!("ReelDeck verify — {}", output.display());
+        match (&source_found, &source_hash) {
+            (Some(p), Some(h)) => println!("Source: {} (sha256 {h})", p.display()),
+            (Some(p), None) => println!(
+                "Source: {} (found but could not be hashed; the source check is skipped)",
+                p.display()
+            ),
+            (None, _) => println!(
+                "Source: not found (tried: {})",
+                source_tried
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+        for c in &report.checks {
+            let label = match c.status {
+                rd_core::CheckStatus::Pass => "PASS",
+                rd_core::CheckStatus::Fail => "FAIL",
+                rd_core::CheckStatus::Skipped => "SKIP",
+            };
+            println!("{label} {} — {}", c.name, c.detail);
+        }
+        if report.ok() {
+            println!("Verification: OK");
+        } else {
+            println!(
+                "Verification: FAILED ({} failed, {} skipped)",
+                report.failed(),
+                report.skipped()
+            );
+        }
+    }
+    if report.ok() {
+        0
+    } else {
+        1
+    }
+}
+
+fn cmd_rerun(args: &[String]) -> i32 {
+    let parsed = match parse_rerun_args(args) {
+        Ok(p) => p,
+        Err(c) => return c as i32,
+    };
+    let log = match load_sidecar(
+        "rerun",
+        "export log",
+        &parsed.log_path,
+        rd_core::ExportLog::from_json,
+    ) {
+        Ok(l) => l,
+        Err(c) => return c,
+    };
+    // Rerunning a *failed* run's proof is a category error: there
+    // is no recorded success to reproduce. The recipe can still be
+    // run directly — say how.
+    if !log.success {
+        eprintln!(
+            "reeldeck rerun: the recorded run did not succeed; \
+             rerun its recipe directly with `export` if that is intended"
+        );
+        return 1;
+    }
+    // The recipe sidecar: beside the log first (the proof set is
+    // moved as a set), then the recorded path as given.
+    let (recorded_recipe_path, _) = rd_run::sidecar_paths(Path::new(&log.output_name));
+    let recipe_path = match parent_dir(&parsed.log_path) {
+        Some(dir) => {
+            let beside = dir.join(&recorded_recipe_path);
+            if beside.exists() {
+                beside
+            } else if let Some(file_name) = recorded_recipe_path.file_name() {
+                let by_name = dir.join(file_name);
+                if by_name.exists() {
+                    by_name
+                } else if recorded_recipe_path.exists() {
+                    recorded_recipe_path.clone()
+                } else {
+                    beside
+                }
+            } else if recorded_recipe_path.exists() {
+                recorded_recipe_path.clone()
+            } else {
+                beside
+            }
+        }
+        None => recorded_recipe_path.clone(),
+    };
+    if !recipe_path.exists() {
+        eprintln!(
+            "reeldeck rerun: missing recipe sidecar {} — the recorded run's recipe cannot be re-run without it",
+            recipe_path.display()
+        );
+        return 1;
+    }
+    let recipe = match load_sidecar("rerun", "recipe", &recipe_path, rd_core::Recipe::from_json) {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+    let input = match parsed.input {
+        Some(p) => {
+            if !p.exists() {
+                eprintln!("reeldeck rerun: input file does not exist: {}", p.display());
+                return 1;
+            }
+            p
+        }
+        None => {
+            let (found, tried) = resolve_beside(&recipe.source_name, parent_dir(&parsed.log_path));
+            match found {
+                Some(p) => p,
+                None => {
+                    eprintln!(
+                        "reeldeck rerun: source file not found (tried: {})",
+                        tried
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    return 1;
+                }
+            }
+        }
+    };
+    let output = parsed.output.unwrap_or_else(|| {
+        PathBuf::from(rerun_output_path(&log.output_name, recipe.export_preset))
+    });
+    let report = match run_render("rerun", &recipe, &input, &output, None) {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+    print_determinism(&log, &report);
+    0
+}
+
+/// The determinism verdict for a rerun, decided purely from the
+/// three facts the comparison has: whether the output files are
+/// byte-equal, the recorded run's stream digest, and this run's
+/// stream digest (see `ExportLog::output_stream_sha256`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeterminismVerdict {
+    /// The output files hash identically.
+    BitIdentical,
+    /// The files differ, but both stream digests are present and
+    /// equal: the elementary streams are identical, and only the
+    /// container around them changed.
+    StreamsBitIdentical,
+    /// Both stream digests are present and they differ — the
+    /// streams themselves changed, not only the container.
+    StreamsDiffer,
+    /// At least one stream digest is missing (a log written before
+    /// stream hashing, or a streamhash pass that failed), so no
+    /// stream-level comparison can be made.
+    StreamComparisonUnavailable,
+}
+
+fn determinism_verdict(
+    file_hashes_equal: bool,
+    recorded_stream: Option<&str>,
+    new_stream: Option<&str>,
+) -> DeterminismVerdict {
+    if file_hashes_equal {
+        return DeterminismVerdict::BitIdentical;
+    }
+    match (recorded_stream, new_stream) {
+        (Some(recorded), Some(new)) => {
+            if recorded.eq_ignore_ascii_case(new) {
+                DeterminismVerdict::StreamsBitIdentical
+            } else {
+                DeterminismVerdict::StreamsDiffer
+            }
+        }
+        _ => DeterminismVerdict::StreamComparisonUnavailable,
+    }
+}
+
+/// After a rerun, compare what was produced with what the recorded
+/// run produced, at two levels: the output files, and — when both
+/// logs carry one — the elementary-stream digests. Facts only:
+/// equal hashes are stated as such; a file difference with equal
+/// streams is named as container metadata; a stream difference is
+/// reported with both hashes and both tool versions, so a changed
+/// tool is named as the likely cause when the versions differ —
+/// and when they do not, that is said plainly too.
+fn print_determinism(recorded: &rd_core::ExportLog, report: &rd_run::RunReport) {
+    let Some(recorded_hash) = &recorded.output_sha256 else {
+        println!("Determinism: cannot compare — the recorded log carries no output hash");
+        return;
+    };
+    // The rerun's own log is its record of the tool that ran and of
+    // the streams it wrote; read it once for both.
+    let new_log = std::fs::read_to_string(&report.log_path)
+        .ok()
+        .and_then(|text| rd_core::ExportLog::from_json(&text).ok());
+    let recorded_stream = recorded.output_stream_sha256.as_deref();
+    let new_stream = new_log
+        .as_ref()
+        .and_then(|log| log.output_stream_sha256.as_deref());
+    let verdict = determinism_verdict(
+        report.output_sha256.eq_ignore_ascii_case(recorded_hash),
+        recorded_stream,
+        new_stream,
+    );
+    match verdict {
+        DeterminismVerdict::BitIdentical => {
+            println!(
+                "Determinism: bit-identical to the recorded run (sha256 {})",
+                report.output_sha256
+            );
+        }
+        DeterminismVerdict::StreamsBitIdentical => {
+            println!(
+                "Determinism: streams bit-identical to the recorded run; \
+                 file bytes differ — the container carries per-run metadata \
+                 (Matroska writes a Segment UUID and DateUTC)."
+            );
+            println!("  recorded run: sha256 {recorded_hash}");
+            println!("  this run:     sha256 {}", report.output_sha256);
+            if let Some(stream) = recorded_stream {
+                println!("  streams:      sha256 {stream}");
+            }
+            print_ffmpeg_version_lines(recorded, new_log.as_ref());
+        }
+        DeterminismVerdict::StreamsDiffer => {
+            println!("Determinism: output differs from the recorded run");
+            println!("  recorded run: sha256 {recorded_hash}");
+            println!("  this run:     sha256 {}", report.output_sha256);
+            if let (Some(recorded_s), Some(new_s)) = (recorded_stream, new_stream) {
+                println!(
+                    "  streams differ too: recorded sha256 {recorded_s}, \
+                     this run sha256 {new_s} — not only the container changed."
+                );
+            }
+            print_version_comparison(recorded, new_log.as_ref());
+        }
+        DeterminismVerdict::StreamComparisonUnavailable => {
+            println!("Determinism: output differs from the recorded run");
+            println!("  recorded run: sha256 {recorded_hash}");
+            println!("  this run:     sha256 {}", report.output_sha256);
+            if recorded_stream.is_none() {
+                println!(
+                    "  Stream-level comparison unavailable: \
+                     the recorded run predates stream hashing."
+                );
+            } else {
+                println!(
+                    "  Stream-level comparison unavailable: this run's stream \
+                     hash could not be computed (its export log records why)."
+                );
+            }
+            print_version_comparison(recorded, new_log.as_ref());
+        }
+    }
+}
+
+/// The recorded and current FFmpeg version lines, without any
+/// commentary on causes.
+fn print_ffmpeg_version_lines(recorded: &rd_core::ExportLog, new_log: Option<&rd_core::ExportLog>) {
+    let recorded_version = recorded
+        .ffmpeg_version
+        .as_deref()
+        .unwrap_or("unknown (not recorded)");
+    let current_version = new_log.and_then(|log| log.ffmpeg_version.as_deref());
+    println!("  recorded FFmpeg: {recorded_version}");
+    println!(
+        "  this run's FFmpeg: {}",
+        current_version.unwrap_or("unknown")
+    );
+}
+
+/// The recorded and current FFmpeg version lines, with the cause
+/// commentary used when a difference is unexplained: a changed tool
+/// version is named as the likely cause when the versions differ —
+/// and when they do not, that is said plainly too.
+fn print_version_comparison(recorded: &rd_core::ExportLog, new_log: Option<&rd_core::ExportLog>) {
+    let recorded_version = recorded
+        .ffmpeg_version
+        .as_deref()
+        .unwrap_or("unknown (not recorded)");
+    let current_version = new_log.and_then(|log| log.ffmpeg_version.clone());
+    match (&recorded.ffmpeg_version, &current_version) {
+        (Some(a), Some(b)) if a != b => {
+            println!("  recorded FFmpeg: {a}");
+            println!("  this run's FFmpeg: {b}");
+            println!(
+                "  The tool version changed since the recorded run; \
+                 a different build is the likely cause of the different bytes."
+            );
+        }
+        (Some(_), Some(_)) => {
+            println!("  recorded FFmpeg: {recorded_version}");
+            println!(
+                "  this run's FFmpeg: {}",
+                current_version.as_deref().unwrap_or("unknown")
+            );
+            println!(
+                "  Same recipe and tool version, different bytes — \
+                 this run and the recorded run are both preserved; \
+                 investigate before trusting either."
+            );
+        }
+        _ => {
+            println!("  recorded FFmpeg: {recorded_version}");
+            println!(
+                "  this run's FFmpeg: {}",
+                current_version
+                    .as_deref()
+                    .unwrap_or("unknown (the new export log could not be read)")
+            );
+            println!(
+                "  The tool versions could not both be read, so the \
+                 cause cannot be narrowed down from the logs."
+            );
+        }
+    }
+}
+
+/// `capture.restored.mkv` -> `capture.restored.rerun.mkv`: the rerun
+/// is a new file beside the caller's working directory, visibly a
+/// rerun of the recorded output.
+fn rerun_output_path(output_name: &str, preset: rd_core::ExportPreset) -> String {
+    let path = Path::new(output_name);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    let ext = path
+        .extension()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| preset.extension().to_string());
+    format!("{stem}.rerun.{ext}")
 }
 
 /// `clip.mkv` + PreservationMaster -> `clip.preview.mkv`.
@@ -1033,6 +1620,151 @@ mod tests {
             preview_output_path(Path::new("clip.mp4"), rd_core::ExportPreset::Access),
             "clip.preview.mp4"
         );
+    }
+
+    #[test]
+    fn parse_verify_args_accepts_path_and_json() {
+        let args: Vec<String> = ["out.mkv"].iter().map(ToString::to_string).collect();
+        let (path, json) = parse_verify_args(&args).expect("path only");
+        assert_eq!(path, PathBuf::from("out.mkv"));
+        assert!(!json);
+        let args: Vec<String> = ["--json", "out.mkv"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let (path, json) = parse_verify_args(&args).expect("json flag");
+        assert_eq!(path, PathBuf::from("out.mkv"));
+        assert!(json);
+        for bad in [
+            vec![],
+            vec!["--json"],
+            vec!["a.mkv", "b.mkv"],
+            vec!["a.mkv", "--nope"],
+        ] {
+            let args: Vec<String> = bad.iter().map(ToString::to_string).collect();
+            assert!(
+                parse_verify_args(&args).is_err(),
+                "{bad:?} must be a usage error"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rerun_args_accepts_log_and_flags() {
+        let args: Vec<String> = ["out.mkv.export-log.json"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let parsed = parse_rerun_args(&args).expect("log only");
+        assert_eq!(parsed.log_path, PathBuf::from("out.mkv.export-log.json"));
+        assert!(parsed.input.is_none());
+        assert!(parsed.output.is_none());
+        let args: Vec<String> = ["log.json", "--in", "src.mkv", "--out", "again.mkv"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let parsed = parse_rerun_args(&args).expect("flags");
+        assert_eq!(parsed.input, Some(PathBuf::from("src.mkv")));
+        assert_eq!(parsed.output, Some(PathBuf::from("again.mkv")));
+        for bad in [
+            vec![],
+            vec!["--in", "x.mkv"],
+            vec!["log.json", "--in"],
+            vec!["log.json", "--nope"],
+            vec!["a.json", "b.json"],
+        ] {
+            let args: Vec<String> = bad.iter().map(ToString::to_string).collect();
+            assert!(
+                parse_rerun_args(&args).is_err(),
+                "{bad:?} must be a usage error"
+            );
+        }
+    }
+
+    #[test]
+    fn determinism_verdict_levels() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        // File equality decides outright; the stream digests are
+        // not consulted (either may be missing).
+        assert_eq!(
+            determinism_verdict(true, None, None),
+            DeterminismVerdict::BitIdentical
+        );
+        assert_eq!(
+            determinism_verdict(true, Some(&a), Some(&b)),
+            DeterminismVerdict::BitIdentical
+        );
+        // Files differ, streams equal (case-insensitively).
+        assert_eq!(
+            determinism_verdict(false, Some(&a), Some(&a)),
+            DeterminismVerdict::StreamsBitIdentical
+        );
+        assert_eq!(
+            determinism_verdict(false, Some(&a.to_uppercase()), Some(&a)),
+            DeterminismVerdict::StreamsBitIdentical
+        );
+        // Files and streams differ.
+        assert_eq!(
+            determinism_verdict(false, Some(&a), Some(&b)),
+            DeterminismVerdict::StreamsDiffer
+        );
+        // Any missing stream digest: no stream-level comparison.
+        assert_eq!(
+            determinism_verdict(false, None, Some(&a)),
+            DeterminismVerdict::StreamComparisonUnavailable
+        );
+        assert_eq!(
+            determinism_verdict(false, Some(&a), None),
+            DeterminismVerdict::StreamComparisonUnavailable
+        );
+        assert_eq!(
+            determinism_verdict(false, None, None),
+            DeterminismVerdict::StreamComparisonUnavailable
+        );
+    }
+
+    #[test]
+    fn rerun_output_names_mark_the_rerun() {
+        assert_eq!(
+            rerun_output_path(
+                "capture.restored.mkv",
+                rd_core::ExportPreset::PreservationMaster
+            ),
+            "capture.restored.rerun.mkv"
+        );
+        // Only the file name matters; a recorded directory is not
+        // carried into the caller's working directory.
+        assert_eq!(
+            rerun_output_path("some/dir/clip.restored.mp4", rd_core::ExportPreset::Access),
+            "clip.restored.rerun.mp4"
+        );
+        assert_eq!(
+            rerun_output_path("noext", rd_core::ExportPreset::Mezzanine),
+            "noext.rerun.mov"
+        );
+    }
+
+    #[test]
+    fn resolve_beside_finds_direct_then_anchor_dir() {
+        let dir = std::env::temp_dir().join(format!("reeldeck-cli-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let beside = dir.join("media.mkv");
+        std::fs::write(&beside, b"x").expect("write beside file");
+        // Missing everywhere: no hit, and the tried list says where
+        // it looked.
+        let (found, tried) = resolve_beside("absent.mkv", Some(&dir));
+        assert!(found.is_none());
+        assert!(tried.iter().any(|p| p.ends_with("absent.mkv")));
+        // Present beside the anchor.
+        let (found, _) = resolve_beside("media.mkv", Some(&dir));
+        assert_eq!(found, Some(beside.clone()));
+        // A name carrying a foreign directory still resolves by its
+        // bare file name beside the anchor.
+        let (found, _) = resolve_beside("elsewhere/media.mkv", Some(&dir));
+        assert_eq!(found, Some(beside));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

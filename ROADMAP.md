@@ -31,7 +31,10 @@ done when its criteria pass, not when its code merely compiles.
 
 - Two-pass stabilization with transforms saved in the project
 - Denoise (hqdn3d/nlmeans) and finish tools (crop/scale/levels/deflicker)
-- Batch queue + rerun-a-recipe + verify (hash comparison)
+- [x] Rerun-a-recipe (`reeldeck rerun`, with a determinism report
+  against the recorded run) + verify (hash comparison,
+  `reeldeck verify`)
+- [ ] Batch queue
 - VapourSynth/QTGMC as the optional archival tier
 
 ## Later / maybe never
