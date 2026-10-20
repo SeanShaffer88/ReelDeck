@@ -25,6 +25,10 @@ pub enum PipelineError {
     RequiresVapourSynth,
     #[error("recipe produced an empty filter chain")]
     EmptyChain,
+    #[error("invalid preview segment: {0}")]
+    InvalidSegment(String),
+    #[error("preview is not available for a chain with stabilization: the stabilization analysis pass must run over the whole input, so a segment preview cannot show what the full render will do")]
+    PreviewWithStabilization,
 }
 
 /// Format an f32 the way filter strings want it: integers without a
@@ -72,7 +76,12 @@ pub fn filter_for_operation(
             zoom_percent,
             tripod,
         } => Ok(format!(
-            "vidstabtransform=input=\"{transforms_file}\":smoothing={smoothing}:zoom={}:tripod={}",
+            // No quotes around the file name: FFmpeg's filter parser
+            // does not treat `"` as quoting, so a quoted name would
+            // create/read a file literally named `"transforms.trf"`.
+            // The transforms name is this workspace's own constant
+            // and carries no filter-special characters.
+            "vidstabtransform=input={transforms_file}:smoothing={smoothing}:zoom={}:tripod={}",
             fmt_num(*zoom_percent),
             if *tripod { 1 } else { 0 }
         )),
@@ -122,6 +131,17 @@ pub fn filter_for_operation(
     }
 }
 
+/// Format seconds for a seek/duration argument: integers without a
+/// trailing `.0`, fractions trimmed — the f64 sibling of [`fmt_num`].
+fn fmt_secs(v: f64) -> String {
+    if v == v.trunc() {
+        format!("{}", v as i64)
+    } else {
+        let s = format!("{v:.3}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
 /// The comma-joined FFmpeg filter chain for a whole recipe, in order.
 pub fn filter_chain(recipe: &Recipe) -> Result<String, PipelineError> {
     filter_chain_with_transforms(recipe, DEFAULT_TRANSFORMS_FILE)
@@ -168,13 +188,22 @@ pub fn stabilization_plan(input: &str, smoothing: u32, transforms_file: &str) ->
             "-i".to_string(),
             input.to_string(),
             "-vf".to_string(),
-            format!("vidstabdetect=shakiness=5:accuracy=15:result=\"{transforms_file}\""),
+            // vidstabdetect measures motion on one plane and its
+            // frame allocation asserts (aborts the process) when the
+            // negotiated input format is multi-plane RGB — exactly
+            // what an FFV1 preservation source decodes to. Convert
+            // for the analysis pass only; the export chain that
+            // reaches the output keeps the source format untouched
+            // (vidstabtransform handles it directly, verified).
+            format!(
+                "format=yuv420p,vidstabdetect=shakiness=5:accuracy=15:result={transforms_file}"
+            ),
             "-f".to_string(),
             "null".to_string(),
             "-".to_string(),
         ],
         pass2_filter: format!(
-            "vidstabtransform=input=\"{transforms_file}\":smoothing={smoothing}:zoom=0:tripod=0"
+            "vidstabtransform=input={transforms_file}:smoothing={smoothing}:zoom=0:tripod=0"
         ),
         transforms_file: transforms_file.to_string(),
     }
@@ -274,6 +303,65 @@ pub fn export_plan(
         filter_chain: chain,
         args,
         stabilization,
+    })
+}
+
+/// Build the plan for a **segment preview**: the recipe's chain and
+/// preset, rendered over `[start_secs, start_secs + duration_secs)`
+/// of the input instead of the whole file. Seeking is input seeking
+/// (`-ss` before `-i`, fast and keyframe-accurate enough for a
+/// preview the operator compares by eye); the duration is cut after
+/// the input (`-t`), so the frames decoded are exactly the segment.
+///
+/// A chain with stabilization cannot be previewed this way: its
+/// analysis pass must see the whole input, so a segment render would
+/// show something the full render will not reproduce. That is
+/// refused with [`PipelineError::PreviewWithStabilization`] rather
+/// than silently approximated — the plan shown is the plan that can
+/// run, or there is no plan.
+pub fn preview_plan(
+    recipe: &Recipe,
+    input: &str,
+    output: &str,
+    start_secs: f64,
+    duration_secs: f64,
+) -> Result<ExportPlan, PipelineError> {
+    if !start_secs.is_finite() || start_secs < 0.0 {
+        return Err(PipelineError::InvalidSegment(format!(
+            "start must be a finite, non-negative number of seconds, got {start_secs}"
+        )));
+    }
+    if !duration_secs.is_finite() || duration_secs <= 0.0 {
+        return Err(PipelineError::InvalidSegment(format!(
+            "duration must be a finite, positive number of seconds, got {duration_secs}"
+        )));
+    }
+    let chain = filter_chain(recipe)?;
+    if recipe.needs_stabilization_pass() {
+        return Err(PipelineError::PreviewWithStabilization);
+    }
+    let mut args: Vec<String> = vec![
+        "ffmpeg".to_string(),
+        "-hide_banner".to_string(),
+        "-ss".to_string(),
+        fmt_secs(start_secs),
+        "-i".to_string(),
+        input.to_string(),
+        "-t".to_string(),
+        fmt_secs(duration_secs),
+        "-vf".to_string(),
+        chain.clone(),
+    ];
+    args.extend(preset_args(recipe.export_preset));
+    args.push("-y".to_string());
+    args.push(output.to_string());
+    Ok(ExportPlan {
+        input: input.to_string(),
+        output: output.to_string(),
+        preset: recipe.export_preset,
+        filter_chain: chain,
+        args,
+        stabilization: None,
     })
 }
 
@@ -413,10 +501,78 @@ mod tests {
         assert!(stab
             .pass1_args
             .iter()
-            .any(|a| a.contains("vidstabdetect") && a.contains("transforms.trf")));
+            .any(|a| a
+                == "format=yuv420p,vidstabdetect=shakiness=5:accuracy=15:result=transforms.trf"));
         assert!(plan
             .filter_chain
-            .contains("vidstabtransform=input=\"transforms.trf\":smoothing=15"));
+            .contains("vidstabtransform=input=transforms.trf:smoothing=15"));
+    }
+
+    #[test]
+    fn golden_preview_args_seek_and_cut() {
+        let plan = preview_plan(&deinterlace_recipe(), "in.mkv", "preview.mkv", 12.5, 10.0)
+            .expect("preview plan");
+        assert_eq!(
+            plan.args,
+            vec![
+                "ffmpeg",
+                "-hide_banner",
+                "-ss",
+                "12.5",
+                "-i",
+                "in.mkv",
+                "-t",
+                "10",
+                "-vf",
+                "bwdif=mode=send_field:parity=tff:deint=all",
+                "-c:v",
+                "ffv1",
+                "-level",
+                "3",
+                "-coder",
+                "1",
+                "-context",
+                "1",
+                "-g",
+                "1",
+                "-slices",
+                "24",
+                "-slicecrc",
+                "1",
+                "-c:a",
+                "flac",
+                "-y",
+                "preview.mkv",
+            ]
+        );
+        assert!(plan.stabilization.is_none());
+        assert_eq!(plan.preset, ExportPreset::PreservationMaster);
+    }
+
+    #[test]
+    fn preview_rejects_bad_segments() {
+        for (start, duration) in [(-1.0, 10.0), (0.0, 0.0), (5.0, -2.0), (f64::NAN, 1.0)] {
+            assert!(
+                matches!(
+                    preview_plan(&deinterlace_recipe(), "in.mkv", "p.mkv", start, duration),
+                    Err(PipelineError::InvalidSegment(_))
+                ),
+                "start={start} duration={duration} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn preview_refuses_stabilization_chains() {
+        let recipe = Recipe::new("in.mp4", ExportPreset::Access).push(Operation::Stabilize {
+            smoothing: 15,
+            zoom_percent: 0.0,
+            tripod: false,
+        });
+        assert!(matches!(
+            preview_plan(&recipe, "in.mp4", "p.mp4", 0.0, 5.0),
+            Err(PipelineError::PreviewWithStabilization)
+        ));
     }
 
     #[test]

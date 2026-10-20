@@ -4,6 +4,7 @@ members = [
     "crates/rd-core",
     "crates/rd-analyze",
     "crates/rd-pipeline",
+    "crates/rd-run",
     "crates/rd-ui",
     "crates/reeldeck",
 ]

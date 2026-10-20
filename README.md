@@ -7,10 +7,11 @@ production teams. It exists for footage that is old, interlaced, noisy, shaky,
 or otherwise difficult — and for people who need to say, later and with
 evidence, exactly what was done to it.
 
-> **Status: v0.1 skeleton.** This repository currently holds the workspace
-> scaffolding, the recipe/export-log data model, frame-analysis parsing,
-> pipeline planning, and a small CLI. It does not render video yet. Follow
-> the [roadmap](ROADMAP.md) as it becomes real, slice by slice.
+> **Status: v0.2 in progress.** This repository holds the workspace, the
+> recipe/export-log data model, frame-analysis parsing and reporting,
+> pipeline planning, render execution with proof sidecars, and a small
+> CLI. The GUI shell has not landed yet. Follow the
+> [roadmap](ROADMAP.md) as it becomes real, slice by slice.
 
 ## Why not a black box?
 
@@ -60,19 +61,22 @@ leaves the disk.
 | `crates/rd-core` | Pure logic: recipe + export-log model, validation, SHA-256 fixity. No FFI. |
 | `crates/rd-analyze` | ffprobe / signalstats / detect-filter / idet parsing into a typed inspection model, plus the sampled-range `analyze` pass that runs the tools. |
 | `crates/rd-pipeline` | Planning: recipe → filter strings, two-pass stabilization plan, export argument vectors. Plans only; never executes. |
+| `crates/rd-run` | Execution: runs plans with FFmpeg (fixity gate, never-overwrite, measured progress, cancellation) and writes the recipe + export-log proof beside every output. |
 | `crates/rd-ui` | GUI state model (queue/viewer/chain/jobs). Framework decision deferred — see the plan. |
-| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `hash`, `version`. |
+| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `hash`, `version`. |
 
 ## Building from source
 
-Requirements: Rust 1.80 or newer. Inspection additionally needs FFmpeg
-(which provides `ffmpeg`/`ffprobe`) on the PATH at runtime.
+Requirements: Rust 1.80 or newer. Inspection and rendering additionally
+need FFmpeg (which provides `ffmpeg`/`ffprobe`) on the PATH at runtime.
 
 ```sh
 cargo build --workspace --release
 cargo run -p reeldeck -- hash <file>
 cargo run -p reeldeck -- inspect <file>
 cargo run -p reeldeck -- plan <recipe.json>
+cargo run -p reeldeck -- export <recipe.json>
+cargo run -p reeldeck -- preview <recipe.json> --start 60 --duration 10
 ```
 
 `inspect` analyzes a sampled range of a file and prints a text
@@ -86,6 +90,32 @@ cargo run -p reeldeck -- inspect capture.mkv
 cargo run -p reeldeck -- inspect capture.mkv --start 60 --duration 30 --json
 # Text report, plus a standalone HTML report (always a new file)
 cargo run -p reeldeck -- inspect capture.mkv --html report.html
+```
+
+`export` renders a recipe end to end. Before anything runs, the
+input must hash to the recipe's pinned SHA-256 (when it carries
+one), and the output must not already exist — outputs are always
+new files. Beside the output, two sidecars are written: the recipe
+as executed (`<out>.recipe.json`) and the export log
+(`<out>.export-log.json`) recording the exact command that ran,
+tool versions, frame counts, warnings, and both hashes:
+
+```sh
+# Input defaults to the recipe's source name,
+# output to <source-stem>.restored.<ext>
+cargo run -p reeldeck -- export recipe.json
+# Explicit input/output
+cargo run -p reeldeck -- export recipe.json --in capture.mkv --out restored.mkv
+```
+
+`preview` renders one segment of a recipe (same fixity gate, same
+sidecars; the segment is recorded in the recorded recipe's notes),
+so a chain can be judged on the worst seconds before committing to
+a full render:
+
+```sh
+# Ten seconds starting a minute in; output defaults to <stem>.preview.<ext>
+cargo run -p reeldeck -- preview recipe.json --start 60 --duration 10
 ```
 
 Checks every change must pass (also run by CI):
