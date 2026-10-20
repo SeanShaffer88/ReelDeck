@@ -58,12 +58,12 @@ leaves the disk.
 
 | Crate | Role |
 | ----- | ---- |
-| `crates/rd-core` | Pure logic: recipe + export-log model, validation, SHA-256 fixity. No FFI. |
+| `crates/rd-core` | Pure logic: recipe + export-log model, validation, SHA-256 fixity, export verification. No FFI. |
 | `crates/rd-analyze` | ffprobe / signalstats / detect-filter / idet parsing into a typed inspection model, plus the sampled-range `analyze` pass that runs the tools. |
 | `crates/rd-pipeline` | Planning: recipe → filter strings, two-pass stabilization plan, export argument vectors. Plans only; never executes. |
 | `crates/rd-run` | Execution: runs plans with FFmpeg (fixity gate, never-overwrite, measured progress, cancellation) and writes the recipe + export-log proof beside every output. |
 | `crates/rd-ui` | GUI state model (queue/viewer/chain/jobs). Framework decision deferred — see the plan. |
-| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `hash`, `version`. |
+| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `hash`, `version`. |
 
 ## Building from source
 
@@ -77,6 +77,8 @@ cargo run -p reeldeck -- inspect <file>
 cargo run -p reeldeck -- plan <recipe.json>
 cargo run -p reeldeck -- export <recipe.json>
 cargo run -p reeldeck -- preview <recipe.json> --start 60 --duration 10
+cargo run -p reeldeck -- verify <output-file>
+cargo run -p reeldeck -- rerun <output-file>.export-log.json
 ```
 
 `inspect` analyzes a sampled range of a file and prints a text
@@ -116,6 +118,46 @@ a full render:
 ```sh
 # Ten seconds starting a minute in; output defaults to <stem>.preview.<ext>
 cargo run -p reeldeck -- preview recipe.json --start 60 --duration 10
+```
+
+`verify` checks an export against the proof it shipped with. Each
+check is reported on its own line — the recorded run succeeded, the
+output still hashes to the value its export log recorded, the
+source still hashes to the value the recipe pinned, and the
+sidecars agree on preset and schema. A check whose evidence is
+missing (for example, the source file is no longer where the
+recipe said it was) is reported as SKIP, never as PASS:
+
+```sh
+cargo run -p reeldeck -- verify restored.mkv
+# The whole report as JSON
+cargo run -p reeldeck -- verify restored.mkv --json
+```
+
+`rerun` closes the loop: it re-executes a recorded export's recipe
+(the recipe sidecar next to the export log) beside a new output —
+`<stem>.rerun.<ext>` by default — and reports how the new output
+compares to the recorded run, at two levels. The export log
+records both the output file's SHA-256 and `output_stream_sha256`,
+a digest of the elementary streams' hashes, and the verdict names
+which level matches:
+
+- **bit-identical** — the files hash the same. For Matroska
+  outputs this is the exception, not the rule: the muxer writes a
+  per-run Segment UUID and DateUTC into every file.
+- **streams bit-identical** — the files differ only in that
+  container metadata; the picture and sound streams are
+  bit-for-bit what the recorded run produced.
+- **streams differ** — both stream digests, both file hashes, and
+  both FFmpeg versions are printed, so a changed tool version is
+  named as the likely cause instead of the difference passing
+  silently.
+
+Rerunning a *failed* run's log is refused; its recipe can still be
+run directly with `export`:
+
+```sh
+cargo run -p reeldeck -- rerun restored.mkv.export-log.json
 ```
 
 Checks every change must pass (also run by CI):

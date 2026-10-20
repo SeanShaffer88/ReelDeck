@@ -35,7 +35,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use rd_core::{sha256_file, ExportLog, Recipe};
+use rd_core::{is_sha256_hex, sha256_file, sha256_hex, ExportLog, Recipe};
 use rd_pipeline::{ExportPlan, PipelineError};
 
 // ---------------------------------------------------------------------------
@@ -139,6 +139,54 @@ pub fn parse_progress(text: &str) -> Vec<Progress> {
 }
 
 // ---------------------------------------------------------------------------
+// Stream hashes (ffmpeg -f streamhash)
+// ---------------------------------------------------------------------------
+
+/// Reduce FFmpeg streamhash output to a single digest of the output's
+/// elementary streams.
+///
+/// The streamhash muxer prints one line per stream, in stream order:
+///
+/// ```text
+/// 0,v,SHA256=8fe294d02bef24d496de17024083117e3fd052b9a59c3b8b5cd64b793003a55d
+/// 1,a,SHA256=059866cdd502ec900cb6b8b6c6367ca253f5b2b58fd9bb0be46510f872d20d88
+/// ```
+///
+/// The digest is the SHA-256 of the per-stream hash values in printed
+/// order, joined with `'\n'` (no trailing newline). It deliberately
+/// covers only the streams: a container may carry per-run metadata
+/// (a Matroska Segment UUID and DateUTC) that makes two runs of the
+/// same recipe differ as files while their streams are identical.
+///
+/// Returns `None` for empty or malformed output — a digest is never
+/// built from a partial parse.
+pub fn parse_streamhash_digest(text: &str) -> Option<String> {
+    let mut hashes: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split(',');
+        let index = parts.next()?;
+        let _stream_type = parts.next()?;
+        let assignment = parts.next()?;
+        if parts.next().is_some() || index.parse::<u32>().is_err() {
+            return None;
+        }
+        let (name, value) = assignment.split_once('=')?;
+        if !name.eq_ignore_ascii_case("SHA256") || !is_sha256_hex(value) {
+            return None;
+        }
+        hashes.push(value);
+    }
+    if hashes.is_empty() {
+        return None;
+    }
+    Some(sha256_hex(hashes.join("\n").as_bytes()))
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -238,6 +286,40 @@ fn ffmpeg_version() -> Option<String> {
         .lines()
         .next()
         .map(|s| s.trim().to_string())
+}
+
+/// The stream digest of a finished output, via an FFmpeg stream-copy
+/// streamhash pass (`-map 0 -c copy -f streamhash -hash sha256`):
+/// demuxing and re-hashing never re-encodes, so the digest covers
+/// exactly the elementary streams the render wrote.
+///
+/// Failure is reported as a plain message, not a [`RunError`]: this
+/// pass is an optional addition to the proof of a render that already
+/// succeeded, and the caller records the failure as a log warning
+/// rather than failing the run over it.
+fn output_stream_hash(output: &Path) -> Result<String, String> {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(output)
+        .args([
+            "-map",
+            "0",
+            "-c",
+            "copy",
+            "-f",
+            "streamhash",
+            "-hash",
+            "sha256",
+            "-",
+        ])
+        .output()
+        .map_err(|e| format!("could not start ffmpeg: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("ffmpeg exited with {}", out.status));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    parse_streamhash_digest(&text)
+        .ok_or_else(|| "ffmpeg streamhash output could not be parsed".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -360,9 +442,12 @@ pub fn run_export(
 ///    file is reused and the reuse is recorded as a log warning.
 /// 3. **The render**, streaming progress to `opts.on_progress`, with
 ///    cooperative cancellation.
-/// 4. **Proof**: on success the output is hashed and both sidecars
-///    are written; on failure/cancel the partial output is deleted
-///    and the sidecars record `success = false` and what happened.
+/// 4. **Proof**: on success the output is hashed — its file bytes,
+///    and its elementary streams via a stream-copy streamhash pass
+///    (whose failure is recorded as a log warning, never a failed
+///    run) — and both sidecars are written; on failure/cancel the
+///    partial output is deleted and the sidecars record
+///    `success = false` and what happened.
 pub fn run_plan(
     plan: ExportPlan,
     recipe: &Recipe,
@@ -438,12 +523,27 @@ pub fn run_plan(
     match outcome.result {
         RenderResult::Success => {
             let output_sha256 = sha256_file(&ctx.output)?;
+            // The stream-level proof pass. A failure here never fails
+            // the completed render — the digest stays `None` and the
+            // reason is recorded as a warning in the log, so the gap
+            // in the proof is visible rather than silent.
+            let (output_stream_sha256, stream_warning) = match output_stream_hash(&ctx.output) {
+                Ok(digest) => (Some(digest), None),
+                Err(why) => (
+                    None,
+                    Some(format!("output stream hash could not be computed: {why}")),
+                ),
+            };
+            if let Some(warning) = stream_warning {
+                warnings.push(warning);
+            }
             let mut log = ctx.build_log();
             log.frames_processed = outcome.latest.frame;
             log.frames_dropped = outcome.latest.drop_frames;
             log.frames_duplicated = outcome.latest.dup_frames;
             log.warnings = warnings;
             log.finish(now_iso8601_utc(), Some(output_sha256.clone()), true);
+            log.output_stream_sha256 = output_stream_sha256;
             ctx.write_sidecars(&log)
                 .map_err(|e| RunError::SidecarFailed {
                     detail: format!(
@@ -810,6 +910,60 @@ progress=end
         assert!(parse_progress("not key value\n===\n").is_empty());
         // No progress= terminator: the block is incomplete, dropped.
         assert!(parse_progress("frame=7\nfps=3.0\n").is_empty());
+    }
+
+    // -- streamhash parsing ----------------------------------------------
+    //
+    // Both fixtures are raw stdout captured from FFmpeg 8.1.2 running
+    // `ffmpeg -v error -i <file> -map 0 -c copy -f streamhash -hash
+    // sha256 -` on lavfi-generated clips (testsrc video, sine audio).
+    // The expected digests are the SHA-256 of the per-stream values
+    // joined with '\n', computed independently of this crate.
+
+    const STREAMHASH_TWO_STREAMS: &str = "\
+0,v,SHA256=8fe294d02bef24d496de17024083117e3fd052b9a59c3b8b5cd64b793003a55d
+1,a,SHA256=059866cdd502ec900cb6b8b6c6367ca253f5b2b58fd9bb0be46510f872d20d88
+";
+
+    const STREAMHASH_VIDEO_ONLY: &str = "\
+0,v,SHA256=8fe294d02bef24d496de17024083117e3fd052b9a59c3b8b5cd64b793003a55d
+";
+
+    #[test]
+    fn streamhash_digest_two_streams() {
+        assert_eq!(
+            parse_streamhash_digest(STREAMHASH_TWO_STREAMS).as_deref(),
+            Some("96f278d652872808af6b8b211ed5e40d279c04dcd5de4173f72bb2c2fdaaa52b")
+        );
+    }
+
+    #[test]
+    fn streamhash_digest_video_only() {
+        assert_eq!(
+            parse_streamhash_digest(STREAMHASH_VIDEO_ONLY).as_deref(),
+            Some("fb7e487976031248f6cc6b204251d1635c77c5e938280e9cde26c2c1df166ffc")
+        );
+    }
+
+    #[test]
+    fn streamhash_digest_rejects_empty_and_malformed_output() {
+        assert_eq!(parse_streamhash_digest(""), None);
+        assert_eq!(parse_streamhash_digest("\n"), None);
+        // Not a streamhash line at all.
+        assert_eq!(parse_streamhash_digest("hello\n"), None);
+        // Hash value is not a SHA-256 hex string.
+        assert_eq!(parse_streamhash_digest("0,v,SHA256=xyz\n"), None);
+        // A different hash algorithm than the one requested.
+        assert_eq!(
+            parse_streamhash_digest(
+                "0,v,MD5=8fe294d02bef24d496de17024083117e3fd052b9a59c3b8b5cd64b793003a55d\n"
+            ),
+            None
+        );
+        // One good line does not rescue a malformed second line: no
+        // digest is built from a partial parse.
+        let mixed = format!("{STREAMHASH_VIDEO_ONLY}garbage\n");
+        assert_eq!(parse_streamhash_digest(&mixed), None);
     }
 
     // -- executed vector -------------------------------------------------

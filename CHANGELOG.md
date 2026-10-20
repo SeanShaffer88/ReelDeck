@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Closing the Prove loop: export verification in `rd-core`
+  (`verify_export` — the recorded run, the output hash, the source
+  hash, the preset, and the schema version, each checked separately
+  against the sidecars and the files on disk; a check whose evidence
+  is absent is reported as skipped, never passed) and the
+  `reeldeck verify` / `reeldeck rerun` subcommands. `verify` checks
+  an output against the proof it shipped with and names any failed
+  check. `rerun` re-executes a recorded run's recipe beside a new
+  output and reports how the result compares to the recorded run
+  (see the stream-level verdict below). Rerunning a failed run's
+  log is refused (its recipe can still be run directly with
+  `export`).
+- Stream-level fixity for exports, following a measured finding:
+  two runs of the same recipe writing FFV1 in Matroska are not
+  byte-identical as files — the muxer writes a per-run Segment UUID
+  and DateUTC — while their elementary streams are bit-identical.
+  The export log therefore records `output_stream_sha256` next to
+  the output file hash: the digest of the output's per-stream
+  SHA-256 values, computed by a stream-copy streamhash pass after
+  a successful render. A streamhash pass that fails is recorded as
+  a warning in the log, never as a failed run; logs written before
+  the field existed load with it absent. `rerun`'s verdict is now
+  three-level: bit-identical files; streams bit-identical, with
+  the file difference named as container metadata; or streams
+  differing, reported with both file hashes, both stream digests,
+  and both FFmpeg versions, so a changed tool version is named as
+  the likely cause rather than the difference passing silently.
+  When one side predates stream hashing, the verdict says the
+  stream-level comparison is unavailable instead of guessing.
 - First executed renders: new `rd-run` crate (the only crate that
   executes renders; `rd-pipeline` still plans only) and the
   `reeldeck export` / `reeldeck preview` subcommands. A run gates on

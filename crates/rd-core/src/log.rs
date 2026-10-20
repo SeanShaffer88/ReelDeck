@@ -21,6 +21,20 @@ pub struct ExportLog {
     /// or after a failed run.
     #[serde(default)]
     pub output_sha256: Option<String>,
+    /// Hex SHA-256 of the concatenated FFmpeg streamhash values for all
+    /// streams of the output — the per-stream SHA-256 values from a
+    /// stream-copy streamhash pass, in stream order, joined and hashed
+    /// by `rd_run::parse_streamhash_digest` — computed after a
+    /// successful render. Unlike [`Self::output_sha256`] this digest
+    /// covers only the elementary streams, not the container, so two
+    /// runs of the same recipe can be compared at stream level even
+    /// when the container bytes differ (a Matroska muxer writes a
+    /// per-run Segment UUID and DateUTC). `None` on failed runs, when
+    /// the streamhash pass itself could not be completed (the log's
+    /// warnings then say so), and in logs written before this field
+    /// existed.
+    #[serde(default)]
+    pub output_stream_sha256: Option<String>,
     pub preset: ExportPreset,
     /// Version string of the FFmpeg build that ran, when known.
     #[serde(default)]
@@ -63,6 +77,7 @@ impl ExportLog {
             source_sha256: source_sha256.into(),
             output_name: output_name.into(),
             output_sha256: None,
+            output_stream_sha256: None,
             preset,
             ffmpeg_version: None,
             vapoursynth_version: None,
@@ -122,5 +137,48 @@ mod tests {
         assert_eq!(log, back);
         assert!(back.success);
         assert_eq!(back.frames_processed, 14_400);
+    }
+
+    fn sample_log() -> ExportLog {
+        let mut log = ExportLog::new(
+            1,
+            "capture_1987.mkv",
+            "a".repeat(64),
+            "capture_1987.restored.mkv",
+            ExportPreset::PreservationMaster,
+            vec!["ffmpeg".into(), "-i".into(), "capture_1987.mkv".into()],
+            "2026-10-20T03:00:00Z",
+        );
+        log.finish("2026-10-20T03:12:00Z", Some("b".repeat(64)), true);
+        log
+    }
+
+    #[test]
+    fn log_without_stream_hash_field_deserializes_as_none() {
+        // Logs written before output_stream_sha256 existed must still
+        // load, with the missing field read as "not recorded".
+        let mut value: serde_json::Value =
+            serde_json::to_value(sample_log()).expect("log to value");
+        value
+            .as_object_mut()
+            .expect("log is an object")
+            .remove("output_stream_sha256");
+        let text = serde_json::to_string(&value).expect("value to json");
+        let back = ExportLog::from_json(&text).expect("pre-field log deserializes");
+        assert_eq!(back.output_stream_sha256, None);
+        assert_eq!(back.output_sha256.as_deref(), Some("b".repeat(64).as_str()));
+    }
+
+    #[test]
+    fn stream_hash_field_round_trips() {
+        let mut log = sample_log();
+        log.output_stream_sha256 = Some("c".repeat(64));
+        let json = log.to_json().expect("serialize");
+        let back = ExportLog::from_json(&json).expect("deserialize");
+        assert_eq!(back, log);
+        assert_eq!(
+            back.output_stream_sha256.as_deref(),
+            Some("c".repeat(64).as_str())
+        );
     }
 }
