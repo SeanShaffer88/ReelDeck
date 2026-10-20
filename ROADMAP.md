@@ -14,7 +14,7 @@ done when its criteria pass, not when its code merely compiles.
   fixture tests
 - [x] Pipeline planning: filter strings, two-pass stabilization plan,
   export argument vectors (golden-tested)
-- [ ] `reeldeck inspect` report surface (JSON/HTML) over a sampled range
+- [x] `reeldeck inspect` report surface (JSON/HTML) over a sampled range
 - [ ] Export-log writer wired to real runs
 
 ## v0.2 — First restoration chain

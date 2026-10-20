@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `reeldeck inspect` report surface over a sampled range
+  (`--start` / `--duration` / `--tout`): plain-text report by default,
+  the full report as JSON with `--json`, and a standalone HTML report
+  written to a new file with `--html <file>` (existing files are never
+  overwritten). The report carries probe facts, per-frame signal
+  statistics aggregated over the range (YAVG / SATAVG / TOUT / BRNG
+  min/max/mean), black/freeze/temporal-outlier anomalies sorted by
+  source position, and an `idet`-based interlace suggestion whose
+  basis counts are printed alongside it — findings are suggestions
+  for the operator to confirm, never verdicts. `rd-analyze` gained
+  the sampled-range model, signal summarization, `idet` parsing, and
+  the `analyze` execution pass over ffprobe/ffmpeg.
 - Workspace skeleton (v0.1): Rust workspace with `rd-core`, `rd-analyze`,
   `rd-pipeline`, `rd-ui`, and the `reeldeck` CLI binary, licensed
   GPL-2.0-only.
