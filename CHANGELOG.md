@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- License: GPL-2.0-only → MIT (maintainer decision, 2026-10-20).
+
 ### Added
 
 - Closing the Prove loop: export verification in `rd-core`

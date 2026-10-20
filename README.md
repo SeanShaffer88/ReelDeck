@@ -178,5 +178,4 @@ cargo build --workspace --release
 
 ## License
 
-GNU General Public License, version 2 only (GPL-2.0-only). See the LICENSE
-file in this repository.
+MIT License. See the LICENSE file in this repository.
