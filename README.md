@@ -58,7 +58,7 @@ leaves the disk.
 | Crate | Role |
 | ----- | ---- |
 | `crates/rd-core` | Pure logic: recipe + export-log model, validation, SHA-256 fixity. No FFI. |
-| `crates/rd-analyze` | ffprobe / signalstats / detect-filter parsing into a typed inspection model. |
+| `crates/rd-analyze` | ffprobe / signalstats / detect-filter / idet parsing into a typed inspection model, plus the sampled-range `analyze` pass that runs the tools. |
 | `crates/rd-pipeline` | Planning: recipe → filter strings, two-pass stabilization plan, export argument vectors. Plans only; never executes. |
 | `crates/rd-ui` | GUI state model (queue/viewer/chain/jobs). Framework decision deferred — see the plan. |
 | `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `hash`, `version`. |
@@ -73,6 +73,19 @@ cargo build --workspace --release
 cargo run -p reeldeck -- hash <file>
 cargo run -p reeldeck -- inspect <file>
 cargo run -p reeldeck -- plan <recipe.json>
+```
+
+`inspect` analyzes a sampled range of a file and prints a text
+report (probe facts, signal statistics, anomalies, and an interlace
+*suggestion* with its basis counts):
+
+```sh
+# Whole file, text report
+cargo run -p reeldeck -- inspect capture.mkv
+# A 30-second sample starting 60 seconds in, as JSON
+cargo run -p reeldeck -- inspect capture.mkv --start 60 --duration 30 --json
+# Text report, plus a standalone HTML report (always a new file)
+cargo run -p reeldeck -- inspect capture.mkv --html report.html
 ```
 
 Checks every change must pass (also run by CI):

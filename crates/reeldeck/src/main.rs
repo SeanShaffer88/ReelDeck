@@ -5,7 +5,9 @@
 //! CLI surface is four subcommands. If that stops being true, revisit.
 //!
 //! Subcommands:
-//!   reeldeck inspect <file>       Probe a media file and print the result
+//!   reeldeck inspect <file> [flags]  Analyze a sampled range of a media
+//!                                    file and print a report (text by
+//!                                    default; --json / --html <file>)
 //!   reeldeck plan <recipe.json>   Print the export plan for a recipe
 //!   reeldeck hash <file>          Print the file's SHA-256
 //!   reeldeck version              Print the version
@@ -41,7 +43,11 @@ fn print_usage() {
         "ReelDeck — transparent, reproducible video restoration\n\
          \n\
          USAGE:\n\
-         \x20 reeldeck inspect <file>       Probe a media file (ffprobe) and print the result\n\
+         \x20 reeldeck inspect <file> [--start <secs>] [--duration <secs>] [--tout <ratio>] [--json] [--html <file>]\n\
+         \x20                               Analyze a sampled range: signal stats, anomalies,\n\
+         \x20                               interlace suggestion (text report; --json for the\n\
+         \x20                               machine-readable report, --html <file> also writes a\n\
+         \x20                               standalone HTML report to a NEW file)\n\
          \x20 reeldeck plan <recipe.json>   Print the export plan (argument vector) for a recipe\n\
          \x20 reeldeck hash <file>          Print the file's SHA-256\n\
          \x20 reeldeck version              Print the version"
@@ -75,29 +81,490 @@ fn cmd_hash(args: &[String]) -> i32 {
     }
 }
 
+/// Default temporal-outlier ratio for `inspect` (see
+/// `rd_analyze::temporal_outliers`: 0.05..=0.20 suits tape captures).
+const DEFAULT_TOUT_THRESHOLD: f64 = 0.05;
+
+struct InspectOptions {
+    path: PathBuf,
+    start: f64,
+    duration: Option<f64>,
+    tout: f64,
+    json: bool,
+    html: Option<PathBuf>,
+}
+
+const INSPECT_USAGE: &str = "reeldeck inspect <file> [--start <secs>] [--duration <secs>] \
+                            [--tout <ratio>] [--json] [--html <file>]";
+
+fn parse_inspect_args(args: &[String]) -> Result<InspectOptions, u8> {
+    let mut opts = InspectOptions {
+        path: PathBuf::new(),
+        start: 0.0,
+        duration: None,
+        tout: DEFAULT_TOUT_THRESHOLD,
+        json: false,
+        html: None,
+    };
+    let mut have_path = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        let value = |i: &mut usize| -> Result<String, u8> {
+            *i += 1;
+            args.get(*i).cloned().ok_or_else(|| {
+                eprintln!("reeldeck inspect: missing value for {arg}");
+                eprintln!("usage: {INSPECT_USAGE}");
+                2u8
+            })
+        };
+        match arg.as_str() {
+            "--start" => {
+                let v = value(&mut i)?;
+                opts.start = parse_f64_flag("--start", &v)?;
+            }
+            "--duration" => {
+                let v = value(&mut i)?;
+                opts.duration = Some(parse_f64_flag("--duration", &v)?);
+            }
+            "--tout" => {
+                let v = value(&mut i)?;
+                opts.tout = parse_f64_flag("--tout", &v)?;
+            }
+            "--json" => opts.json = true,
+            "--html" => {
+                let v = value(&mut i)?;
+                opts.html = Some(PathBuf::from(v));
+            }
+            flag if flag.starts_with("--") => {
+                eprintln!("reeldeck inspect: unknown flag '{flag}'");
+                eprintln!("usage: {INSPECT_USAGE}");
+                return Err(2);
+            }
+            _ => {
+                if have_path {
+                    eprintln!("reeldeck inspect: unexpected extra argument '{arg}'");
+                    eprintln!("usage: {INSPECT_USAGE}");
+                    return Err(2);
+                }
+                opts.path = PathBuf::from(arg);
+                have_path = true;
+            }
+        }
+        i += 1;
+    }
+    if !have_path {
+        eprintln!("usage: {INSPECT_USAGE}");
+        return Err(2);
+    }
+    // Bad values are usage errors (exit 2), distinct from a failed
+    // analysis (exit 1): validate before any tool runs.
+    let range = rd_analyze::SampleRange::new(opts.start, opts.duration);
+    if let Err(e) = range.validate() {
+        eprintln!("reeldeck inspect: {e}");
+        return Err(2);
+    }
+    if !opts.tout.is_finite() || !(0.0..=1.0).contains(&opts.tout) {
+        eprintln!(
+            "reeldeck inspect: --tout must be a ratio between 0 and 1, got {}",
+            opts.tout
+        );
+        return Err(2);
+    }
+    Ok(opts)
+}
+
+fn parse_f64_flag(flag: &str, raw: &str) -> Result<f64, u8> {
+    raw.parse::<f64>().map_err(|_| {
+        eprintln!("reeldeck inspect: {flag} expects a number, got '{raw}'");
+        eprintln!("usage: {INSPECT_USAGE}");
+        2u8
+    })
+}
+
 fn cmd_inspect(args: &[String]) -> i32 {
-    let path = match one_file_arg(args, "reeldeck inspect <file>") {
-        Ok(p) => p,
+    let opts = match parse_inspect_args(args) {
+        Ok(o) => o,
         Err(c) => return c as i32,
     };
-    match rd_analyze::probe(&path) {
-        Ok(info) => {
-            match serde_json::to_string_pretty(&info) {
-                Ok(json) => println!("{json}"),
-                Err(e) => {
-                    eprintln!("reeldeck inspect: cannot serialize result: {e}");
-                    return 1;
-                }
-            }
-            0
-        }
-        // ToolUnavailable and friends are reported plainly, never faked:
-        // inspection without the tool is impossible, so say so.
-        Err(e) => {
-            eprintln!("reeldeck inspect: {e}");
-            1
+    // The HTML report is always a NEW file (outputs are never
+    // overwritten — the same rule that protects sources). Refuse
+    // early, before spending time on analysis.
+    if let Some(html_path) = &opts.html {
+        if html_path.exists() {
+            eprintln!(
+                "reeldeck inspect: {} already exists; refusing to overwrite it",
+                html_path.display()
+            );
+            return 1;
         }
     }
+    let range = rd_analyze::SampleRange::new(opts.start, opts.duration);
+    let report = match rd_analyze::analyze(&opts.path, range, opts.tout) {
+        Ok(r) => r,
+        // ToolUnavailable and friends are reported plainly, never faked:
+        // inspection without the tools is impossible, so say so.
+        Err(e) => {
+            eprintln!("reeldeck inspect: {e}");
+            return 1;
+        }
+    };
+    if opts.json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(json) => println!("{json}"),
+            Err(e) => {
+                eprintln!("reeldeck inspect: cannot serialize result: {e}");
+                return 1;
+            }
+        }
+    } else {
+        print!("{}", render_text(&report));
+    }
+    if let Some(html_path) = &opts.html {
+        if let Err(code) = write_html_report(html_path, &report) {
+            return code;
+        }
+    }
+    0
+}
+
+fn write_html_report(path: &Path, report: &rd_analyze::AnalysisReport) -> Result<(), i32> {
+    use std::io::Write;
+    // create_new: fail rather than overwrite, even if the file
+    // appeared after the early existence check.
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("reeldeck inspect: cannot create {}: {e}", path.display());
+            return Err(1);
+        }
+    };
+    match file.write_all(render_html(report).as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("reeldeck inspect: cannot write {}: {e}", path.display());
+            Err(1)
+        }
+    }
+}
+
+fn suggestion_label(s: rd_analyze::InterlaceSuggestion) -> &'static str {
+    use rd_analyze::InterlaceSuggestion::*;
+    match s {
+        TopFieldFirst => "Top field first (TFF)",
+        BottomFieldFirst => "Bottom field first (BFF)",
+        Progressive => "Progressive",
+        Undetermined => "Undetermined",
+    }
+}
+
+fn fmt_range(range: rd_analyze::SampleRange) -> String {
+    match range.duration_secs {
+        Some(d) => format!("start {:.2}s, duration {:.2}s", range.start_secs, d),
+        None if range.start_secs > 0.0 => {
+            format!("start {:.2}s, to end of file", range.start_secs)
+        }
+        None => "full file".to_string(),
+    }
+}
+
+fn render_text(report: &rd_analyze::AnalysisReport) -> String {
+    use std::fmt::Write as _;
+    let probe = &report.probe;
+    let mut out = String::new();
+    let _ = writeln!(out, "ReelDeck inspect — {}", report.source);
+    let _ = writeln!(
+        out,
+        "Format: {} · Duration: {:.2}s · Size: {} bytes",
+        probe.format_name, probe.duration_secs, probe.size_bytes
+    );
+    if let Some(v) = probe.first_video() {
+        let dims = match (v.width, v.height) {
+            (Some(w), Some(h)) => format!(" {w}x{h}"),
+            _ => String::new(),
+        };
+        let rate = v
+            .avg_frame_rate
+            .as_deref()
+            .map(|r| format!(" @ {r} fps"))
+            .unwrap_or_default();
+        let field = v
+            .field_order
+            .as_deref()
+            .map(|f| format!(" · field_order: {f}"))
+            .unwrap_or_default();
+        let _ = writeln!(out, "Video: {}{}{}{}", v.codec_name, dims, rate, field);
+    }
+    let _ = writeln!(out, "Range: {}", fmt_range(report.range));
+    let _ = writeln!(out, "Frames analyzed: {}", report.frames_analyzed);
+    out.push('\n');
+    match &report.signal {
+        Some(s) => {
+            let _ = writeln!(out, "Signal (min / max / mean over analyzed frames):");
+            for (name, m) in [
+                ("YAVG", s.y_avg),
+                ("SATAVG", s.sat_avg),
+                ("TOUT", s.tout),
+                ("BRNG", s.brng),
+            ] {
+                let _ = writeln!(
+                    out,
+                    "  {name:<7} {:.4} / {:.4} / {:.4}",
+                    m.min, m.max, m.mean
+                );
+            }
+        }
+        None => {
+            let _ = writeln!(out, "Signal: no frames measured in this range.");
+        }
+    }
+    out.push('\n');
+    let idet = &report.idet;
+    let _ = writeln!(
+        out,
+        "Interlace suggestion: {} (a suggestion — confirm in the viewer)",
+        suggestion_label(report.suggestion)
+    );
+    let _ = writeln!(
+        out,
+        "  Basis (idet counts): single TFF {} BFF {} Progressive {} Undetermined {}; \
+         multi TFF {} BFF {} Progressive {} Undetermined {}; \
+         repeated fields Neither {} Top {} Bottom {}",
+        idet.single_tff,
+        idet.single_bff,
+        idet.single_progressive,
+        idet.single_undetermined,
+        idet.multi_tff,
+        idet.multi_bff,
+        idet.multi_progressive,
+        idet.multi_undetermined,
+        idet.neither,
+        idet.repeated_top,
+        idet.repeated_bottom,
+    );
+    out.push('\n');
+    if report.anomalies.is_empty() {
+        let _ = writeln!(out, "Anomalies: none found in this range.");
+    } else {
+        let _ = writeln!(out, "Anomalies ({}):", report.anomalies.len());
+        for a in &report.anomalies {
+            match a {
+                rd_analyze::Anomaly::BlackSpan {
+                    start_secs,
+                    end_secs,
+                } => {
+                    let _ = writeln!(out, "  Black span       {start_secs:.2}s – {end_secs:.2}s");
+                }
+                rd_analyze::Anomaly::FreezeSpan {
+                    start_secs,
+                    end_secs,
+                } => {
+                    let _ = writeln!(out, "  Freeze span      {start_secs:.2}s – {end_secs:.2}s");
+                }
+                rd_analyze::Anomaly::TemporalOutlier {
+                    frame,
+                    pts_time,
+                    tout,
+                } => {
+                    let _ = writeln!(
+                        out,
+                        "  Temporal outlier frame {frame} at {pts_time:.2}s (TOUT {tout:.4})"
+                    );
+                }
+            }
+        }
+    }
+    out.push('\n');
+    let _ = writeln!(
+        out,
+        "Findings are suggestions from signal measurements — confirm them in the viewer before acting on them."
+    );
+    out
+}
+
+/// Escape a string for HTML text/attribute content.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn render_html(report: &rd_analyze::AnalysisReport) -> String {
+    use std::fmt::Write as _;
+    let probe = &report.probe;
+    let source = html_escape(&report.source);
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <title>ReelDeck inspect — {source}</title>\n<style>\n\
+         body {{ font-family: system-ui, sans-serif; margin: 2em auto; max-width: 60em; padding: 0 1em; }}\n\
+         table {{ border-collapse: collapse; margin: 0.5em 0 1.5em; }}\n\
+         th, td {{ border: 1px solid #999; padding: 0.25em 0.6em; text-align: left; }}\n\
+         th {{ background: #eee; }}\n\
+         .note {{ color: #444; }}\n</style>\n</head>\n<body>"
+    );
+    let _ = writeln!(out, "<h1>ReelDeck inspect</h1>");
+    let _ = writeln!(out, "<p>Source: <code>{source}</code></p>");
+    let _ = writeln!(out, "<h2>Source</h2>\n<table>");
+    let _ = writeln!(
+        out,
+        "<tr><th>Format</th><td>{}</td></tr>",
+        html_escape(&probe.format_name)
+    );
+    let _ = writeln!(
+        out,
+        "<tr><th>Duration</th><td>{:.2}s</td></tr>",
+        probe.duration_secs
+    );
+    let _ = writeln!(
+        out,
+        "<tr><th>Size</th><td>{} bytes</td></tr>",
+        probe.size_bytes
+    );
+    if let Some(v) = probe.first_video() {
+        let dims = match (v.width, v.height) {
+            (Some(w), Some(h)) => format!(" {w}x{h}"),
+            _ => String::new(),
+        };
+        let rate = v
+            .avg_frame_rate
+            .as_deref()
+            .map(|r| format!(" @ {} fps", html_escape(r)))
+            .unwrap_or_default();
+        let field = v
+            .field_order
+            .as_deref()
+            .map(|f| format!(" · field_order: {}", html_escape(f)))
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "<tr><th>Video</th><td>{}{}{}{}</td></tr>",
+            html_escape(&v.codec_name),
+            dims,
+            rate,
+            field
+        );
+    }
+    let _ = writeln!(out, "</table>");
+    let _ = writeln!(out, "<h2>Range</h2>");
+    let _ = writeln!(out, "<p>{}</p>", html_escape(&fmt_range(report.range)));
+    let _ = writeln!(out, "<p>Frames analyzed: {}</p>", report.frames_analyzed);
+    let _ = writeln!(out, "<h2>Signal</h2>");
+    match &report.signal {
+        Some(s) => {
+            let _ = writeln!(
+                out,
+                "<table>\n<tr><th>Metric</th><th>Min</th><th>Max</th><th>Mean</th></tr>"
+            );
+            for (name, m) in [
+                ("YAVG", s.y_avg),
+                ("SATAVG", s.sat_avg),
+                ("TOUT", s.tout),
+                ("BRNG", s.brng),
+            ] {
+                let _ = writeln!(
+                    out,
+                    "<tr><th>{name}</th><td>{:.4}</td><td>{:.4}</td><td>{:.4}</td></tr>",
+                    m.min, m.max, m.mean
+                );
+            }
+            let _ = writeln!(out, "</table>");
+        }
+        None => {
+            let _ = writeln!(out, "<p>No frames measured in this range.</p>");
+        }
+    }
+    let _ = writeln!(out, "<h2>Interlace suggestion</h2>");
+    let _ = writeln!(
+        out,
+        "<p><strong>{}</strong> — a suggestion; confirm in the viewer.</p>",
+        suggestion_label(report.suggestion)
+    );
+    let idet = &report.idet;
+    let _ = writeln!(
+        out,
+        "<table>\n<tr><th>idet</th><th>TFF</th><th>BFF</th><th>Progressive</th><th>Undetermined</th></tr>\n\
+         <tr><th>Single frame</th><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n\
+         <tr><th>Multi frame</th><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n</table>",
+        idet.single_tff,
+        idet.single_bff,
+        idet.single_progressive,
+        idet.single_undetermined,
+        idet.multi_tff,
+        idet.multi_bff,
+        idet.multi_progressive,
+        idet.multi_undetermined,
+    );
+    let _ = writeln!(
+        out,
+        "<p>Repeated fields: Neither {}, Top {}, Bottom {}</p>",
+        idet.neither, idet.repeated_top, idet.repeated_bottom
+    );
+    let _ = writeln!(out, "<h2>Anomalies</h2>");
+    if report.anomalies.is_empty() {
+        let _ = writeln!(out, "<p>None found in this range.</p>");
+    } else {
+        let _ = writeln!(
+            out,
+            "<table>\n<tr><th>Kind</th><th>Start</th><th>End / detail</th></tr>"
+        );
+        for a in &report.anomalies {
+            match a {
+                rd_analyze::Anomaly::BlackSpan {
+                    start_secs,
+                    end_secs,
+                } => {
+                    let _ = writeln!(
+                        out,
+                        "<tr><td>Black span</td><td>{start_secs:.2}s</td><td>{end_secs:.2}s</td></tr>"
+                    );
+                }
+                rd_analyze::Anomaly::FreezeSpan {
+                    start_secs,
+                    end_secs,
+                } => {
+                    let _ = writeln!(
+                        out,
+                        "<tr><td>Freeze span</td><td>{start_secs:.2}s</td><td>{end_secs:.2}s</td></tr>"
+                    );
+                }
+                rd_analyze::Anomaly::TemporalOutlier {
+                    frame,
+                    pts_time,
+                    tout,
+                } => {
+                    let _ = writeln!(
+                        out,
+                        "<tr><td>Temporal outlier</td><td>{pts_time:.2}s</td><td>frame {frame}, TOUT {tout:.4}</td></tr>"
+                    );
+                }
+            }
+        }
+        let _ = writeln!(out, "</table>");
+    }
+    let _ = writeln!(
+        out,
+        "<p class=\"note\">Findings are suggestions from signal measurements — \
+         confirm them in the viewer before acting on them. \
+         Temporal-outlier threshold: {:.4}.</p>",
+        report.tout_threshold
+    );
+    let _ = writeln!(out, "</body>\n</html>");
+    out
 }
 
 fn cmd_plan(args: &[String]) -> i32 {
@@ -152,6 +619,164 @@ fn derived_output_path(source_name: &str, preset: rd_core::ExportPreset) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_report() -> rd_analyze::AnalysisReport {
+        use rd_analyze::*;
+        AnalysisReport {
+            source: "clip<script>.mkv".to_string(),
+            range: SampleRange::new(1.0, Some(2.0)),
+            probe: ProbeInfo {
+                format_name: "matroska,webm".to_string(),
+                duration_secs: 3.0,
+                size_bytes: 123_456,
+                bit_rate: None,
+                streams: vec![StreamInfo {
+                    index: 0,
+                    codec_type: "video".to_string(),
+                    codec_name: "ffv1".to_string(),
+                    width: Some(720),
+                    height: Some(576),
+                    avg_frame_rate: Some("25/1".to_string()),
+                    field_order: Some("tt".to_string()),
+                    sample_rate: None,
+                    channels: None,
+                }],
+            },
+            frames_analyzed: 50,
+            signal: Some(SignalSummary {
+                y_avg: MetricSummary {
+                    min: 10.0,
+                    max: 100.0,
+                    mean: 55.0,
+                },
+                sat_avg: MetricSummary {
+                    min: 0.0,
+                    max: 20.0,
+                    mean: 5.0,
+                },
+                tout: MetricSummary {
+                    min: 0.0,
+                    max: 0.5,
+                    mean: 0.01,
+                },
+                brng: MetricSummary {
+                    min: 0.0,
+                    max: 0.0,
+                    mean: 0.0,
+                },
+                frames: 50,
+            }),
+            anomalies: vec![Anomaly::BlackSpan {
+                start_secs: 1.5,
+                end_secs: 2.0,
+            }],
+            idet: IdetCounts {
+                single_progressive: 4,
+                multi_progressive: 51,
+                ..Default::default()
+            },
+            suggestion: InterlaceSuggestion::Progressive,
+            tout_threshold: 0.05,
+        }
+    }
+
+    #[test]
+    fn render_text_contains_key_sections() {
+        let text = render_text(&sample_report());
+        for needle in [
+            "ReelDeck inspect",
+            "Format: matroska,webm",
+            "Video: ffv1 720x576 @ 25/1 fps",
+            "field_order: tt",
+            "Range: start 1.00s, duration 2.00s",
+            "Frames analyzed: 50",
+            "YAVG",
+            "Interlace suggestion: Progressive",
+            "Basis (idet counts)",
+            "Anomalies (1)",
+            "Black span",
+            "confirm them in the viewer",
+        ] {
+            assert!(
+                text.contains(needle),
+                "text report missing {needle:?}:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_html_contains_sections_and_escapes_source() {
+        let html = render_html(&sample_report());
+        for needle in [
+            "<!DOCTYPE html>",
+            "<h2>Source</h2>",
+            "<h2>Signal</h2>",
+            "<h2>Interlace suggestion</h2>",
+            "<h2>Anomalies</h2>",
+            "Black span",
+            "clip&lt;script&gt;.mkv",
+        ] {
+            assert!(html.contains(needle), "html report missing {needle:?}");
+        }
+        assert!(
+            !html.contains("clip<script>.mkv"),
+            "raw user-controlled path leaked into HTML"
+        );
+        assert!(!html.contains("http"), "no external assets allowed");
+    }
+
+    #[test]
+    fn parse_inspect_args_defaults_and_flags() {
+        let args: Vec<String> = ["clip.mkv"].iter().map(ToString::to_string).collect();
+        let opts = parse_inspect_args(&args).expect("defaults parse");
+        assert_eq!(opts.path, PathBuf::from("clip.mkv"));
+        assert_eq!(opts.start, 0.0);
+        assert_eq!(opts.duration, None);
+        assert!(!opts.json);
+        assert!(opts.html.is_none());
+
+        let args: Vec<String> = [
+            "--json",
+            "clip.mkv",
+            "--start",
+            "5.5",
+            "--duration",
+            "2",
+            "--tout",
+            "0.2",
+            "--html",
+            "out.html",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let opts = parse_inspect_args(&args).expect("flags parse");
+        assert_eq!(opts.start, 5.5);
+        assert_eq!(opts.duration, Some(2.0));
+        assert_eq!(opts.tout, 0.2);
+        assert!(opts.json);
+        assert_eq!(opts.html, Some(PathBuf::from("out.html")));
+    }
+
+    #[test]
+    fn parse_inspect_args_rejects_bad_values() {
+        for bad in [
+            vec!["clip.mkv", "--start", "abc"],
+            vec!["clip.mkv", "--start", "-1"],
+            vec!["clip.mkv", "--duration", "0"],
+            vec!["clip.mkv", "--tout", "2"],
+            vec!["clip.mkv", "--nope"],
+            vec!["clip.mkv", "--start"],
+            vec!["a.mkv", "b.mkv"],
+            vec![],
+        ] {
+            let args: Vec<String> = bad.iter().map(ToString::to_string).collect();
+            assert!(
+                parse_inspect_args(&args).is_err(),
+                "{bad:?} must be a usage error"
+            );
+        }
+    }
 
     #[test]
     fn derived_output_names_follow_preset() {
