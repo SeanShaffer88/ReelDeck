@@ -1,0 +1,18 @@
+[package]
+name = "reeldeck"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ReelDeck command-line entry point: inspect, plan, hash, version."
+
+[[bin]]
+name = "reeldeck"
+path = "src/main.rs"
+
+[dependencies]
+rd-analyze = { path = "../rd-analyze", version = "0.1.0" }
+rd-core = { path = "../rd-core", version = "0.1.0" }
+rd-pipeline = { path = "../rd-pipeline", version = "0.1.0" }
+serde_json = { workspace = true }

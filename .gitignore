@@ -1,0 +1,22 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Stabilization transform files are project data, not source
+*.trf
+
+# Test / sample media never belongs in the repo
+*.mkv
+*.mp4
+*.mov
+*.avi
+*.mxf
+*.wav
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
