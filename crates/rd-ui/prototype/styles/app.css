@@ -2051,3 +2051,9 @@ input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-of
 /* The inspector's tablist is its own row so the close button is not a
    tablist child (ARIA requires a tablist to contain only tabs). */
 .tabs-inner { display: flex; align-items: stretch; align-self: stretch; }
+
+/* The inspector toggle belongs to the narrow layouts only. */
+#btn-inspector-toggle { display: none; }
+@media (max-width: 1080px) {
+  #btn-inspector-toggle { display: inline-flex; }
+}

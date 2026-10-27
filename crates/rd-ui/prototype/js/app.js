@@ -141,6 +141,7 @@
 
     var active = M.clipMeta(state);
     $("status-clip").textContent = active ? active.id + " · " + active.name : "No source selected";
+    if (active) $("project-crumb").textContent = active.id + " · " + active.name;
   }
 
   function fixityPill(c) {
@@ -629,6 +630,19 @@
     }
     html += "</div>";
 
+    // Engine and storage: what can run, and whether there is room.
+    var est = M.estimateBytes(state);
+    html += '<div class="panel-section"><span class="eyebrow">Engine &amp; storage</span>' +
+      '<div class="sidecar-list">' +
+      '<div class="sidecar">' + U.icon("check") + '<span class="sidecar-name">FFmpeg ' + D.engine.ffmpeg + '</span><span class="sidecar-meta">available</span></div>' +
+      '<div class="sidecar" style="opacity:.75">' + U.icon("info") + '<span class="sidecar-name">VapourSynth</span><span class="sidecar-meta">not installed · optional tier</span></div>' +
+      "</div>" +
+      '<p class="field-help">Recipes that need the archival deinterlace tier (QTGMC) fail loudly rather than substituting an engine. Nothing is approximated silently.</p>' +
+      '<dl class="proof-summary" style="margin-top:8px">' +
+      row("Free on destination", f.bytes(D.project.freeBytes)) +
+      row("Estimated master", est ? f.bytes(est) + " (estimate)" : "—") +
+      "</dl></div>";
+
     // Audio
     html += '<div class="panel-section"><span class="eyebrow">Audio</span><dl class="proof-summary">' +
       row("Format", clip.audio.split("·").slice(0, 2).join(" · ")) +
@@ -1020,7 +1034,7 @@
     var clip = M.clipMeta(state);
     $("status-save").textContent = "Project saved";
     if (clip) {
-      var fix = clip.fixity.state === "ok" ? "Fixity match" : clip.fixity.state === "mismatch" ? "Fixity mismatch" : "Hashing";
+      var fix = clip.fixity.state === "ok" ? "Hash match" : clip.fixity.state === "mismatch" ? "Hash mismatch" : "Hashing";
       $("status-fixity").innerHTML = '<span class="dot ' + (clip.fixity.state === "ok" ? "" : "warn") + '"></span> ' + fix;
     } else {
       $("status-fixity").textContent = "";
@@ -1260,7 +1274,15 @@
     if (!state.chains[id]) {
       var target = M.clipMeta(state);
       state.chains[id] = target && target.inspect.state === "done"
-        ? D.initialChain.map(function (s) { return { module: s.module, params: Object.assign({}, s.params), open: s.module === "deinterlace" }; })
+        ? D.initialChain.map(function (s) {
+          var params = Object.assign({}, s.params);
+          // The confirmed field order feeds the chain: the operator's
+          // decision, not the default, is what the deinterlace step uses.
+          if (s.module === "deinterlace" && target.inspect.confirmed) {
+            params.fieldOrder = target.inspect.confirmed === "progressive" ? "auto" : target.inspect.confirmed;
+          }
+          return { module: s.module, params: params, open: s.module === "deinterlace" };
+        })
         : [];
     }
     state.chain = state.chains[id];
@@ -1782,6 +1804,11 @@
       document.body.dataset.queueOpen = document.body.dataset.queueOpen === "true" ? "false" : "true";
       this.setAttribute("aria-expanded", document.body.dataset.queueOpen);
     });
+    $("btn-inspector-toggle").addEventListener("click", function () {
+      var open = document.body.dataset.inspectorOpen === "true";
+      document.body.dataset.inspectorOpen = open ? "false" : "true";
+      this.setAttribute("aria-expanded", String(!open));
+    });
     $("btn-queue-close").addEventListener("click", function () {
       document.body.dataset.queueOpen = "false";
       $("btn-queue-toggle").setAttribute("aria-expanded", "false");
@@ -1924,6 +1951,7 @@
     // Inspector is a drawer under 1080px; open it when a tab is chosen from the context bar.
     if (["tab", "addModule", "add-module", "renderPreview", "renderExport", "verify", "rerun"].indexOf(action) >= 0) {
       document.body.dataset.inspectorOpen = "true";
+      $("btn-inspector-toggle").setAttribute("aria-expanded", "true");
     }
   }
 

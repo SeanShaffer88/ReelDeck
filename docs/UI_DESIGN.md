@@ -523,12 +523,19 @@ visual reference, not the shipping binary.
 
 | Check | Result | Where |
 | --- | --- | --- |
-| Model unit tests (stages, chain, guards, preflight, timeline, formatting, preferences, commands) | Written; run by CI | `crates/rd-ui/src/*`, CI |
-| Prototype structure and flow (boot, gating, chain edits, preview, export, verify, preferences) | Exercised headlessly (jsdom) with no page errors | Authoring run |
-| Accessibility (WCAG 2.1 A/AA) | 0 axe-core violations on shell and each dialog | Authoring run |
-| Typography, spacing, colour, layout at 1440/1280/1024/860 widths | Reviewed against this document | — |
-| Pixel rendering on a real display and GPU | **Not verified** — no browser available in the authoring environment | — |
+| Model tests (stages, chain, guards, preflight, timeline, formatting, preferences, commands) | **Pass** — 67 `rd-ui` tests, 129 across the workspace | CI, `crates/rd-ui/src/*` |
+| Format and lints (`cargo fmt --check`, clippy with `-D warnings`) | **Pass** | CI |
+| Release build (workspace) | **Pass** | CI |
+| Prototype structure and flow (boot, gating, chain edits, preview, export, verify, preferences) | Exercised headlessly (jsdom): no page errors; expected states reached | Authoring run (scripts not committed) |
+| Accessibility (WCAG 2.1 A/AA) | **0 axe-core violations** on the shell, shortcuts, preferences and export panels | Authoring run (axe-core 4.x, jsdom) |
+| Colour contrast | Reviewed against the token table; contrast targets stated in §3.1. Not machine-measured (no layout engine in the audit environment) | — |
+| Typography, spacing, layout at 1440/1280/1024/860 logical widths | Designed against §4.3; **not** confirmed by rendering on a display | — |
+| Pixel rendering on a real display or GPU | **Not verified** — no usable browser in the authoring environment | — |
 | Real FFmpeg render through this interface | **Not verified** — the prototype simulates jobs | — |
+
+The three failures the first test run found (a single-match warning list,
+an export gate that read "open" with no chain, and a playhead clamped to
+an unmeasured strip) were fixed in the model and are covered by tests.
 
 Claims in this document stop where that table stops. Nothing here is
 described as production-ready.
