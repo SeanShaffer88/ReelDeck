@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en" data-accent="amber" data-density="compact" data-contrast="normal" data-reduce-motion="false">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>ReelDeck — Ashland Oral Histories</title>
+<meta name="description" content="ReelDeck interface prototype: a transparent, reproducible video-restoration workspace. Demonstrates the shell, not a render engine.">
+<link rel="stylesheet" href="styles/tokens.css">
+<link rel="stylesheet" href="styles/app.css">
+</head>
+<body data-inspector-open="false" data-queue-open="false">
+
+<a class="skip-link" href="#workarea">Skip to the work area</a>
+
+<div class="app">
+
+  <!-- ===================== Top bar ===================== -->
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="9.2" stroke="currentColor" stroke-width="1.4"/>
+        <circle cx="12" cy="12" r="3.1" stroke="currentColor" stroke-width="1.4"/>
+        <path d="M12 2.8v6.1M20.2 8.6l-5.4 3.1M20.2 15.4l-5.4-3.1M12 21.2v-6.1M3.8 15.4l5.4-3.1M3.8 8.6l5.4 3.1" stroke="currentColor" stroke-width="1.1"/>
+      </svg>
+      <span class="brand-name">ReelDeck</span>
+    </div>
+
+    <button class="project-switch" id="project-switch" data-action="projectSwitch" aria-haspopup="dialog"
+            title="Project: Ashland Oral Histories — 12 sources, 1 output">
+      <span data-icon="folder" aria-hidden="true"></span>
+      <span class="proj-name truncate">Ashland Oral Histories</span>
+      <span class="crumb">/</span>
+      <span class="crumb truncate" id="project-crumb">04 · Interview — E. Vance</span>
+      <span data-icon="chevron-down" aria-hidden="true"></span>
+    </button>
+
+    <nav class="stage-rail" id="stage-rail" aria-label="Restoration workflow stages"></nav>
+
+    <div class="topbar-right">
+      <span class="prototype-badge" title="This is a design prototype: sample project data and simulated jobs. It does not run FFmpeg.">
+        <span data-icon="flask" aria-hidden="true"></span> Prototype
+      </span>
+      <div class="tool-chip" id="tool-ffmpeg" title="Render engine found on PATH">
+        <span class="dot" aria-hidden="true"></span> <span>FFmpeg 8.0</span>
+      </div>
+      <div class="tool-chip" data-state="absent" id="tool-vs" title="Optional archival tier not installed. Recipes that need it fail loudly rather than substituting an engine.">
+        <span class="dot" aria-hidden="true"></span> <span>VapourSynth —</span>
+      </div>
+      <button class="icon-btn" id="btn-queue-toggle" aria-label="Show source list" title="Source list" aria-expanded="false">
+        <span data-icon="panel-left" aria-hidden="true"></span>
+      </button>
+      <button class="icon-btn" id="btn-inspector-toggle" aria-label="Show inspector" title="Inspector" aria-expanded="false">
+        <span data-icon="sliders" aria-hidden="true"></span>
+      </button>
+      <button class="icon-btn" id="btn-palette-top" aria-label="Search commands (Ctrl+K)" title="Command palette — Ctrl+K">
+        <span data-icon="search" aria-hidden="true"></span>
+      </button>
+      <button class="icon-btn" id="btn-help" aria-label="Keyboard shortcuts (?)" title="Keyboard shortcuts — ?">
+        <span data-icon="help" aria-hidden="true"></span>
+      </button>
+      <button class="icon-btn" id="btn-prefs" aria-label="Preferences (Ctrl+,)" title="Preferences — Ctrl+,">
+        <span data-icon="settings" aria-hidden="true"></span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ===================== Context bar ===================== -->
+  <div class="contextbar">
+    <div class="context-title">
+      <h1 id="context-stage">Ingest</h1>
+      <span class="purpose" id="context-purpose">Add sources, compute fixity, and record what the file is.</span>
+    </div>
+    <div class="context-actions" id="context-actions"></div>
+  </div>
+
+  <!-- ===================== Main ===================== -->
+  <main class="main" id="workarea">
+
+    <!-- Queue -->
+    <section class="queue-panel" aria-labelledby="queue-title">
+      <div class="panel-head">
+        <h2 id="queue-title">Sources</h2>
+        <span class="count" id="queue-count">0 files</span>
+        <div class="spacer"></div>
+        <button class="icon-btn" id="btn-queue-close" aria-label="Hide source list" title="Hide source list">
+          <span data-icon="close" aria-hidden="true"></span>
+        </button>
+        <button class="icon-btn" id="btn-add-source" data-action="addSource" aria-label="Add a source file (Ctrl+O)" title="Add source — Ctrl+O">
+          <span data-icon="plus" aria-hidden="true"></span>
+        </button>
+      </div>
+
+      <div class="queue-search">
+        <span data-icon="search" aria-hidden="true"></span>
+        <input id="queue-filter" type="search" placeholder="Filter sources" aria-label="Filter sources by name">
+        <kbd class="kbd">Ctrl F</kbd>
+      </div>
+
+      <div class="panel-body">
+        <table class="queue-table" aria-describedby="queue-help">
+          <caption class="sr-only">Project sources, their fixity and inspection state</caption>
+          <thead>
+            <tr>
+              <th scope="col">File</th>
+              <th scope="col">State</th>
+              <th scope="col" class="num">Length</th>
+            </tr>
+          </thead>
+          <tbody id="queue-body"></tbody>
+        </table>
+        <p id="queue-help" class="sr-only">Rows are buttons: press Enter or Space to select a source. Selection drives the viewer, the chain and the proof below.</p>
+        <div id="queue-empty" class="empty" hidden>
+          <strong>No sources yet</strong>
+          Add a file to hash it and record what it is. Sources are never modified.
+        </div>
+      </div>
+
+      <div class="panel-foot" id="queue-foot">—</div>
+    </section>
+
+    <!-- Centre: viewer, timeline, jobs -->
+    <section class="center" aria-label="Viewer, timeline and jobs">
+
+      <div class="viewer">
+        <div class="viewer-tools">
+          <div class="mode-group" id="viewer-modes" role="group" aria-label="Viewer mode"></div>
+          <div class="spacer"></div>
+          <button class="btn btn-sm" id="btn-compare" data-action="compare" aria-pressed="false" title="Compare the chain against the untouched source — \">
+            <span data-icon="compare" aria-hidden="true"></span><span>Compare</span>
+          </button>
+          <button class="btn btn-sm" id="btn-zoom" data-action="zoom" aria-pressed="false" title="Toggle 100% pixels — Shift+1">
+            <span data-icon="zoom" aria-hidden="true"></span><span>Fit</span>
+          </button>
+          <button class="btn btn-sm" id="btn-safe" data-action="safe" aria-pressed="false" title="Title and action-safe guides — '">
+            <span data-icon="grid" aria-hidden="true"></span><span>Guides</span>
+          </button>
+        </div>
+
+        <div class="viewer-canvas" id="viewer-canvas">
+          <div class="frame-stack" id="frame-stack">
+            <div class="compare-wrap" id="compare-wrap" hidden>
+              <img class="frame-img frame-before" alt="Source frame: two people seated in a 1980s television studio" src="assets/media/frame-ashland.jpg">
+              <div class="compare-after">
+                <img class="frame-img frame-after" alt="" aria-hidden="true" src="assets/media/frame-ashland.jpg">
+              </div>
+              <div class="wipe-handle" id="wipe-handle" role="slider" tabindex="0"
+                   aria-label="Before and after wipe position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"
+                   title="Drag, or use ← and →, to move the wipe"></div>
+              <span class="wipe-label before">SOURCE</span>
+              <span class="wipe-label after">CHAIN</span>
+            </div>
+
+            <img id="single-frame" class="frame-img frame-after"
+                 alt="Source frame: two people seated in a 1980s television studio, an interview in progress"
+                 src="assets/media/frame-ashland.jpg">
+
+            <div class="field-wrap" id="field-wrap" hidden>
+              <img class="field-img field-left" alt="Top field of the source frame" src="assets/media/frame-ashland.jpg">
+              <img class="field-img field-right" alt="Bottom field of the source frame" src="assets/media/frame-ashland.jpg">
+              <span class="field-divider" aria-hidden="true"></span>
+              <span class="field-tag left">FIELD 1</span>
+              <span class="field-tag right">FIELD 2</span>
+            </div>
+
+            <div class="safe-guides" id="safe-guides" hidden></div>
+            <div class="scope-overlay" id="scope-overlay" hidden>
+              <span class="scope-caption" id="scope-caption">Waveform</span>
+              <canvas id="scope-canvas" aria-hidden="true"></canvas>
+            </div>
+
+            <div class="hud top-left" id="hud-title">04 · Interview — E. Vance (1987)</div>
+            <div class="hud top-right" id="hud-mode">PROGRAM</div>
+            <div class="hud bottom-left num" id="hud-time">00:12:00:00</div>
+            <div class="hud bottom-right" id="hud-facts">720×576 · 25 fps · 4:3</div>
+          </div>
+        </div>
+
+        <div class="viewer-foot">
+          <div class="readout" id="viewer-readout"></div>
+          <div class="spacer"></div>
+          <span id="viewer-note" class="truncate">Measured values come from the inspection of this source.</span>
+        </div>
+      </div>
+
+      <!-- Timeline -->
+      <div class="timeline">
+        <div class="transport">
+          <button class="icon-btn" id="btn-mark-prev" data-action="markPrev" aria-label="Previous finding (N)" title="Previous finding — N">
+            <span data-icon="skip-back" aria-hidden="true"></span>
+          </button>
+          <button class="icon-btn" id="btn-step-back" data-action="step" data-delta="-1" aria-label="Previous frame (Left arrow)" title="Previous frame — ←">
+            <span data-icon="step-back" aria-hidden="true"></span>
+          </button>
+          <button class="icon-btn" id="btn-step-fwd" data-action="step" data-delta="1" aria-label="Next frame (Right arrow)" title="Next frame — →">
+            <span data-icon="step-fwd" aria-hidden="true"></span>
+          </button>
+          <button class="icon-btn" id="btn-mark-next" data-action="markNext" aria-label="Next finding (Shift+N)" title="Next finding — Shift+N">
+            <span data-icon="skip-fwd" aria-hidden="true"></span>
+          </button>
+          <span class="sep" aria-hidden="true"></span>
+          <span class="tc" id="tc-current" aria-live="off">00:00:00:00</span>
+          <span class="tc dim">/</span>
+          <span class="tc dim" id="tc-total">00:42:18:00</span>
+          <span class="sep" aria-hidden="true"></span>
+          <button class="btn btn-sm" id="btn-set-in" data-action="setIn" title="Set preview in-point — I">In</button>
+          <button class="btn btn-sm" id="btn-set-out" data-action="setOut" title="Set preview out-point — O">Out</button>
+          <span class="tc dim" id="tc-range" aria-label="Selected preview range">no range</span>
+          <button class="btn btn-sm btn-ghost" id="btn-suggest-range" data-action="suggestRange" title="Centre a segment on the worst measured moment — Shift+I">
+            <span data-icon="target" aria-hidden="true"></span><span>Suggest</span>
+          </button>
+          <div class="spacer"></div>
+          <button class="btn btn-sm btn-ghost" id="btn-lanes" data-action="lanes" aria-pressed="true" title="Show or hide measurement lanes — G">
+            <span data-icon="wave" aria-hidden="true"></span><span>Lanes</span>
+          </button>
+        </div>
+
+        <div class="timeline-scroll">
+          <div class="timeline-inner" id="timeline-inner">
+            <div class="ruler" id="ruler" role="presentation"></div>
+            <div class="track-row">
+              <div class="track-label">V1 <span class="faint">VID</span></div>
+              <div class="track-area" id="track-area">
+                <div class="clip-block">
+                  <span class="clip-tag">04</span>
+                  <span class="truncate" id="clip-name">Interview — E. Vance</span>
+                  <span class="faint">720×576 · 25p flagged interlaced · 42:18</span>
+                </div>
+              </div>
+            </div>
+            <div class="track-row">
+              <div class="track-label">A1 <span class="faint">48k</span></div>
+              <div class="track-area">
+                <div class="clip-block" style="background:linear-gradient(180deg,#1c2620,#171f1b);">
+                  <span class="clip-tag" style="color:var(--ok)">AUD</span>
+                  <span class="truncate">Stereo mix — −18.4 LUFS integrated, true peak −1.2 dBTP</span>
+                </div>
+              </div>
+            </div>
+            <div class="lanes" id="lanes" data-open="true"></div>
+            <div class="playhead" id="playhead" style="left:0"></div>
+            <div class="selection-band" id="selection-band" hidden></div>
+          </div>
+        </div>
+
+        <div class="marks-strip" id="marks-strip" role="group" aria-label="Findings on this source"></div>
+      </div>
+
+      <!-- Jobs -->
+      <div class="jobs" id="jobs" data-open="false">
+        <button class="jobs-head" id="jobs-head" aria-expanded="false" aria-controls="jobs-body">
+          <span data-icon="chevron-down" aria-hidden="true" class="jobs-caret"></span>
+          <span class="eyebrow" style="letter-spacing:.06em">Jobs</span>
+          <span class="faint" id="jobs-count">none running</span>
+          <span class="spacer"></span>
+          <span class="faint" id="jobs-summary">Renders appear here with measured progress.</span>
+        </button>
+        <div class="jobs-body" id="jobs-body"></div>
+      </div>
+    </section>
+
+    <!-- Inspector -->
+    <aside class="inspector" id="inspector" aria-label="Inspector">
+      <div class="inspector-tabs">
+        <div class="tabs-inner" role="tablist" aria-label="Inspector">
+        <button class="inspector-tab" role="tab" id="tab-source" aria-selected="true" aria-controls="panel-source" data-tab="source">
+          Source
+        </button>
+        <button class="inspector-tab" role="tab" id="tab-chain" aria-selected="false" aria-controls="panel-chain" data-tab="chain" tabindex="-1">
+          Chain <span class="badge-count" id="chain-count">0</span>
+        </button>
+        <button class="inspector-tab" role="tab" id="tab-export" aria-selected="false" aria-controls="panel-export" data-tab="export" tabindex="-1">Export</button>
+        <button class="inspector-tab" role="tab" id="tab-prove" aria-selected="false" aria-controls="panel-prove" data-tab="prove" tabindex="-1">Prove</button>
+        </div>
+        <span class="spacer" style="flex:1"></span>
+        <button class="icon-btn" id="btn-inspector-close" aria-label="Hide inspector" title="Hide inspector">
+          <span data-icon="close" aria-hidden="true"></span>
+        </button>
+      </div>
+
+      <div class="inspector-body" id="inspector-body">
+        <section class="inspector-panel" id="panel-source" role="tabpanel" aria-labelledby="tab-source" tabindex="0"></section>
+        <section class="inspector-panel" id="panel-chain" role="tabpanel" aria-labelledby="tab-chain" tabindex="0" hidden></section>
+        <section class="inspector-panel" id="panel-export" role="tabpanel" aria-labelledby="tab-export" tabindex="0" hidden></section>
+        <section class="inspector-panel" id="panel-prove" role="tabpanel" aria-labelledby="tab-prove" tabindex="0" hidden></section>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ===================== Status bar ===================== -->
+  <footer class="statusbar">
+    <span class="item"><span class="dot" aria-hidden="true"></span> <span id="status-save">Project saved</span></span>
+    <span class="item" id="status-clip">No source selected</span>
+    <span class="item" id="status-fixity"></span>
+    <span class="spacer"></span>
+    <span class="keys">
+      <span class="item"><kbd class="kbd">Ctrl K</kbd> commands</span>
+      <span class="item"><kbd class="kbd">?</kbd> shortcuts</span>
+      <span class="item"><kbd class="kbd">Alt 1–6</kbd> stages</span>
+    </span>
+    <span class="item faint" id="status-engine">Engine: FFmpeg · offline, local only</span>
+  </footer>
+</div>
+
+<div class="inspector-scrim" id="inspector-scrim" hidden></div>
+<div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+<div class="sr-only" id="live-region" role="status" aria-live="polite"></div>
+
+<!-- ===================== Dialogs ===================== -->
+<div class="scrim" id="scrim-palette" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="palette-title">
+    <h2 id="palette-title" class="sr-only">Command palette</h2>
+    <div class="palette-input-row">
+      <span data-icon="search" aria-hidden="true"></span>
+      <input id="palette-input" type="text" placeholder="Type a command, a stage, or a shortcut…"
+             role="combobox" aria-expanded="true" aria-controls="palette-results" aria-autocomplete="list"
+             aria-activedescendant="">
+      <kbd class="kbd">Esc</kbd>
+    </div>
+    <div class="palette-results" id="palette-results" role="listbox" aria-label="Commands"></div>
+    <div class="dialog-foot">
+      <span class="hint"><kbd class="kbd">↑ ↓</kbd> choose · <kbd class="kbd">Enter</kbd> run · <kbd class="kbd">Esc</kbd> close</span>
+      <span class="spacer"></span>
+      <span class="hint" id="palette-count"></span>
+    </div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim-shortcuts" hidden>
+  <div class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+    <div class="dialog-head">
+      <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+      <span class="sub">Every action here is also in the command palette.</span>
+      <button class="icon-btn" data-close-dialog="scrim-shortcuts" aria-label="Close shortcuts">
+        <span data-icon="close" aria-hidden="true"></span>
+      </button>
+    </div>
+    <div class="dialog-body">
+      <div class="shortcut-groups" id="shortcut-groups"></div>
+    </div>
+    <div class="dialog-foot">
+      <span class="hint">Shortcuts use Ctrl on Windows and Linux, ⌘ on macOS.</span>
+      <span class="spacer"></span>
+      <button class="btn" data-close-dialog="scrim-shortcuts">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim-prefs" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="prefs-title">
+    <div class="dialog-head">
+      <h2 id="prefs-title">Preferences</h2>
+      <span class="sub">Display only — nothing here changes a recipe or an export.</span>
+      <button class="icon-btn" data-close-dialog="scrim-prefs" aria-label="Close preferences">
+        <span data-icon="close" aria-hidden="true"></span>
+      </button>
+    </div>
+    <div class="dialog-body" id="prefs-body"></div>
+    <div class="dialog-foot">
+      <button class="btn btn-ghost" id="prefs-reset">Reset to defaults</button>
+      <span class="spacer"></span>
+      <span class="hint">Sizes use binary units (1 KiB = 1024 B).</span>
+      <button class="btn" data-close-dialog="scrim-prefs">Done</button>
+    </div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim-modules" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modules-title">
+    <div class="dialog-head">
+      <h2 id="modules-title">Add a module</h2>
+      <span class="sub">Each states what it can damage before you add it.</span>
+      <button class="icon-btn" data-close-dialog="scrim-modules" aria-label="Close module list">
+        <span data-icon="close" aria-hidden="true"></span>
+      </button>
+    </div>
+    <div class="dialog-body">
+      <div class="module-list" id="module-list"></div>
+    </div>
+    <div class="dialog-foot">
+      <span class="hint">A chain holds at most one of each module; order is render order.</span>
+    </div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim-confirm" hidden>
+  <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-copy">
+    <div class="dialog-head">
+      <h2 id="confirm-title">Render this export?</h2>
+      <button class="icon-btn" data-close-dialog="scrim-confirm" aria-label="Cancel">
+        <span data-icon="close" aria-hidden="true"></span>
+      </button>
+    </div>
+    <div class="dialog-body">
+      <p class="confirm-copy" id="confirm-copy"></p>
+      <div class="confirm-facts" id="confirm-facts"></div>
+    </div>
+    <div class="dialog-foot">
+      <span class="hint" id="confirm-hint">The output is a new file; nothing is overwritten.</span>
+      <span class="spacer"></span>
+      <button class="btn" data-close-dialog="scrim-confirm">Cancel</button>
+      <button class="btn btn-primary" id="confirm-run">Start render</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/format.js"></script>
+<script src="js/data.js"></script>
+<script src="js/model.js"></script>
+<script src="js/components.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

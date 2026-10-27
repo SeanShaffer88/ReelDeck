@@ -8,6 +8,12 @@ and automated contributors alike.
 - The design contract is `docs/ARCHITECTURE_AND_UX_PLAN.md`. Read it before
   substantial work. If implementation reveals the plan is wrong, change the
   plan in the same change and say why.
+- Interface work follows `docs/UI_DESIGN.md`: layout, tokens, states,
+  keyboard and accessibility rules. The model in `crates/rd-ui/src` is
+  authoritative for behaviour; the prototype under
+  `crates/rd-ui/prototype` is the visual reference until the shipping
+  shell exists. Keep the two in step, and change the design document in
+  the same change when the design moves.
 - Small, reviewable steps. Each change does one thing and leaves the tree
   green: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D
   warnings`, `cargo test --workspace`, `cargo build --workspace --release`.
