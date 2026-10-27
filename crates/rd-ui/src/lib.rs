@@ -238,6 +238,25 @@ pub struct ChainLine {
 /// long session's history bounded; the oldest entry drops off first.
 pub const UNDO_LIMIT: usize = 100;
 
+/// One continuous editing gesture whose intermediate values collapse into
+/// a single undo entry: a slider drag from press to release, or a numeric
+/// field from focus to commit. The shell hands out a fresh id per gesture
+/// with [`ShellModel::begin_gesture`]; two adjustments of the same control
+/// in separate gestures get separate ids and therefore separate undos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GestureId(u64);
+
+/// One undo/redo entry: the recipe as it was before an edit, plus the
+/// gesture that produced it. Entries carrying the same [`GestureId`] are
+/// coalesced — only the first one keeps its place in the stack.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct HistoryEntry {
+    recipe: Recipe,
+    #[serde(default)]
+    gesture: Option<GestureId>,
+}
+
 /// Everything the shell knows about one queued source that is not on the
 /// queue row itself: its recipe, the evidence gathered around it, and its
 /// own undo/redo history.
@@ -260,10 +279,10 @@ pub struct SourceState {
     pub exported_output: Option<String>,
     /// Recipes as they were before each chain edit, oldest first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    undo: Vec<Recipe>,
+    undo: Vec<HistoryEntry>,
     /// Recipes rewound by [`SourceState::undo`], consumed again by redo.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    redo: Vec<Recipe>,
+    redo: Vec<HistoryEntry>,
 }
 
 impl SourceState {
@@ -282,14 +301,32 @@ impl SourceState {
         self.undo.len()
     }
 
-    /// Remember the current recipe before an edit. A refused edit calls
+    /// Remember the current recipe before an edit, unless the edit
+    /// continues a gesture whose anchor entry is already stored. Returns
+    /// `true` when a new entry was pushed, so a refused edit knows whether
+    /// it has an entry to forget. A refused edit calls
     /// [`SourceState::forget_last_undo`], so failed attempts leave no
     /// history entry.
-    fn push_undo(&mut self, current: &Recipe) {
-        self.undo.push(current.clone());
+    ///
+    /// Coalescing rule: when `gesture` matches the gesture on the current
+    /// top entry, the anchor recipe from the start of that gesture is
+    /// kept and no new entry is pushed, no matter how many intermediate
+    /// values the drag produced. A different gesture, or any ordinary
+    /// (`None`) edit, starts a fresh entry.
+    fn push_undo(&mut self, current: &Recipe, gesture: Option<GestureId>) -> bool {
+        if let Some(id) = gesture {
+            if self.undo.last().is_some_and(|e| e.gesture == Some(id)) {
+                return false;
+            }
+        }
+        self.undo.push(HistoryEntry {
+            recipe: current.clone(),
+            gesture,
+        });
         if self.undo.len() > UNDO_LIMIT {
             self.undo.remove(0);
         }
+        true
     }
 
     /// Drop the most recent undo entry after an edit was refused.
@@ -304,13 +341,16 @@ impl SourceState {
     /// recipe has not itself been previewed in this state, and offering an
     /// export on a stale preview would break the evidence gate.
     pub fn undo(&mut self) -> bool {
-        let Some(previous) = self.undo.pop() else {
+        let Some(entry) = self.undo.pop() else {
             return false;
         };
         if let Some(current) = self.recipe.take() {
-            self.redo.push(current);
+            self.redo.push(HistoryEntry {
+                recipe: current,
+                gesture: None,
+            });
         }
-        self.recipe = Some(previous);
+        self.recipe = Some(entry.recipe);
         self.previewed = false;
         true
     }
@@ -318,13 +358,16 @@ impl SourceState {
     /// Re-apply an undone edit. The preview rule in [`SourceState::undo`]
     /// applies here too.
     pub fn redo(&mut self) -> bool {
-        let Some(next) = self.redo.pop() else {
+        let Some(entry) = self.redo.pop() else {
             return false;
         };
         if let Some(current) = self.recipe.take() {
-            self.undo.push(current);
+            self.undo.push(HistoryEntry {
+                recipe: current,
+                gesture: None,
+            });
         }
-        self.recipe = Some(next);
+        self.recipe = Some(entry.recipe);
         self.previewed = false;
         true
     }
@@ -355,6 +398,10 @@ pub struct ShellModel {
     pub stage: Stage,
     #[serde(default)]
     pub prefs: WorkspacePrefs,
+    /// Monotonic source of [`GestureId`]s. The id itself has no meaning
+    /// beyond inequality: every fresh drag or focus session gets a new one.
+    #[serde(default)]
+    gesture_counter: u64,
     /// The measured strip behind the viewer. Rebuilt from an inspection;
     /// not persisted with the shell state.
     #[serde(skip)]
@@ -435,6 +482,17 @@ impl ShellModel {
         self.source_mut().is_some_and(SourceState::redo)
     }
 
+    /// Begin one continuous editing gesture (a slider drag, a numeric
+    /// field's focus session). Every parameter replacement tagged with
+    /// the returned id coalesces into a single undo entry, so one undo
+    /// restores the value from before the whole gesture rather than each
+    /// intermediate tick. Call once at gesture start; the id is spent
+    /// when the control is released or focus moves elsewhere.
+    pub fn begin_gesture(&mut self) -> GestureId {
+        self.gesture_counter = self.gesture_counter.saturating_add(1);
+        GestureId(self.gesture_counter)
+    }
+
     /// One-line summaries of the loaded chain, for the right panel.
     pub fn chain_summary(&self) -> Vec<String> {
         match self.recipe() {
@@ -477,9 +535,11 @@ impl ShellModel {
     /// Run one chain edit against the selected source's recipe, recording
     /// the previous recipe for undo. A refused edit changes neither the
     /// chain nor the history, and a successful one clears the redo stack
-    /// because the history has branched.
+    /// because the history has branched. Edits carrying the same
+    /// [`GestureId`] coalesce into one history entry.
     fn edit_recipe<T>(
         &mut self,
+        gesture: Option<GestureId>,
         edit: impl FnOnce(&mut Recipe) -> Result<T, ChainEditError>,
     ) -> Result<T, ChainEditError> {
         let Some(source) = self.source_mut() else {
@@ -494,7 +554,7 @@ impl ShellModel {
                 "no chain is loaded".to_string(),
             ));
         };
-        source.push_undo(&recipe);
+        let pushed = source.push_undo(&recipe, gesture);
         match edit(&mut recipe) {
             Ok(value) => {
                 source.recipe = Some(recipe);
@@ -504,7 +564,11 @@ impl ShellModel {
             }
             Err(err) => {
                 source.recipe = Some(recipe);
-                source.forget_last_undo();
+                // A coalesced tick created no entry, so there is nothing
+                // to forget — the gesture's anchor must survive.
+                if pushed {
+                    source.forget_last_undo();
+                }
                 Err(err)
             }
         }
@@ -513,24 +577,39 @@ impl ShellModel {
     /// Add a module to the loaded chain with conservative defaults. The
     /// edit is undoable per source.
     pub fn chain_add(&mut self, id: ModuleId) -> Result<usize, ChainEditError> {
-        self.edit_recipe(|recipe| add_module(recipe, id))
+        self.edit_recipe(None, |recipe| add_module(recipe, id))
     }
 
     /// Remove a step; the removed operation is returned so the shell can
     /// show what an undo will restore.
     pub fn chain_remove(&mut self, index: usize) -> Result<Operation, ChainEditError> {
-        self.edit_recipe(|recipe| remove_step(recipe, index))
+        self.edit_recipe(None, |recipe| remove_step(recipe, index))
     }
 
     /// Replace a step's parameters; refused values leave the chain and
     /// the undo history untouched.
     pub fn chain_replace(&mut self, index: usize, op: Operation) -> Result<(), ChainEditError> {
-        self.edit_recipe(|recipe| replace_step(recipe, index, op))
+        self.edit_recipe(None, |recipe| replace_step(recipe, index, op))
+    }
+
+    /// Replace a step's parameters as part of a continuous gesture. All
+    /// replacements tagged with the same [`GestureId`] (one slider drag,
+    /// one numeric-field session) collapse into a single undo entry whose
+    /// anchor is the recipe from before the gesture began.
+    pub fn chain_replace_gestured(
+        &mut self,
+        index: usize,
+        op: Operation,
+        gesture: GestureId,
+    ) -> Result<(), ChainEditError> {
+        self.edit_recipe(Some(gesture), |recipe| {
+            replace_step(recipe, index, op)
+        })
     }
 
     /// Restore one step to its module defaults.
     pub fn chain_reset(&mut self, index: usize) -> Result<(), ChainEditError> {
-        self.edit_recipe(|recipe| reset_step(recipe, index))
+        self.edit_recipe(None, |recipe| reset_step(recipe, index))
     }
 
     /// Move a step earlier/later. Order is part of the recipe, so any
@@ -542,7 +621,7 @@ impl ShellModel {
         let Some(mut recipe) = source.recipe.take() else {
             return false;
         };
-        source.push_undo(&recipe);
+        let pushed = source.push_undo(&recipe, None);
         let moved = if earlier {
             move_step_up(&mut recipe, index)
         } else {
@@ -552,7 +631,7 @@ impl ShellModel {
         if moved {
             source.redo.clear();
             source.previewed = false;
-        } else {
+        } else if pushed {
             source.forget_last_undo();
         }
         moved
@@ -1262,5 +1341,164 @@ mod tests {
         let back: ShellModel = serde_json::from_str(&json).expect("deserialize");
         assert!(back.sources[0].can_redo(), "the redo stack survives saving");
         assert!(!back.sources[0].can_undo());
+    }
+
+    #[test]
+    fn one_gesture_coalesces_into_a_single_undo_entry() {
+        let mut shell = ShellModel::new();
+        shell.add_to_queue("a.mkv");
+        shell.load_recipe(
+            Recipe::new("a.mkv", ExportPreset::Access)
+                .push(ModuleId::Denoise.default_operation()),
+        );
+        let anchor = shell.recipe().cloned().expect("recipe");
+        let gesture = shell.begin_gesture();
+        assert_ne!(gesture, shell.begin_gesture(), "every gesture gets a fresh id");
+        for temporal in [4.0_f32, 8.0, 12.0] {
+            shell
+                .chain_replace_gestured(0, denoise(temporal), gesture)
+                .expect("valid tick");
+        }
+        assert_eq!(shell.sources[0].undo_depth(), 1, "three ticks, one entry");
+        match &shell.recipe().expect("recipe").operations[0] {
+            Operation::Denoise { temporal, .. } => assert_eq!(*temporal, 12.0),
+            other => panic!("expected denoise, got {other:?}"),
+        }
+
+        // One undo jumps past every intermediate tick to the pre-gesture
+        // recipe, and one redo restores the gesture's final result.
+        assert!(shell.undo());
+        assert_eq!(shell.recipe().cloned().expect("recipe"), anchor);
+        assert!(!shell.can_undo());
+        assert!(shell.redo());
+        match &shell.recipe().expect("recipe").operations[0] {
+            Operation::Denoise { temporal, .. } => assert_eq!(*temporal, 12.0),
+            other => panic!("expected denoise, got {other:?}"),
+        }
+        assert!(!shell.can_redo());
+    }
+
+    #[test]
+    fn separate_gestures_and_discrete_edits_do_not_coalesce() {
+        let mut shell = ShellModel::new();
+        shell.add_to_queue("a.mkv");
+        shell.load_recipe(
+            Recipe::new("a.mkv", ExportPreset::Access)
+                .push(ModuleId::Denoise.default_operation()),
+        );
+        let first = shell.begin_gesture();
+        shell
+            .chain_replace_gestured(0, denoise(5.0), first)
+            .expect("tick");
+        shell
+            .chain_replace_gestured(0, denoise(6.0), first)
+            .expect("tick");
+        assert_eq!(shell.sources[0].undo_depth(), 1);
+
+        // A discrete edit between gestures ends the chain.
+        shell.chain_add(ModuleId::Finish).expect("add");
+        assert_eq!(shell.sources[0].undo_depth(), 2);
+
+        let second = shell.begin_gesture();
+        shell
+            .chain_replace_gestured(0, denoise(7.0), second)
+            .expect("tick");
+        shell
+            .chain_replace_gestured(0, denoise(8.0), second)
+            .expect("tick");
+        assert_eq!(shell.sources[0].undo_depth(), 3);
+
+        // Two separate drags of the very same control are still two
+        // entries: only the id, not the control, identifies a gesture.
+        let third = shell.begin_gesture();
+        shell
+            .chain_replace_gestured(0, denoise(9.0), third)
+            .expect("tick");
+        assert_eq!(shell.sources[0].undo_depth(), 4);
+    }
+
+    #[test]
+    fn a_refused_tick_keeps_the_gesture_anchor() {
+        let mut shell = ShellModel::new();
+        shell.add_to_queue("a.mkv");
+        shell.load_recipe(
+            Recipe::new("a.mkv", ExportPreset::Access)
+                .push(ModuleId::Denoise.default_operation()),
+        );
+        let anchor = shell.recipe().cloned().expect("recipe");
+        let gesture = shell.begin_gesture();
+        shell
+            .chain_replace_gestured(0, denoise(6.0), gesture)
+            .expect("tick");
+        let bad = Operation::Denoise {
+            engine: DenoiseEngine::Hqdn3d,
+            luma: 99.0,
+            chroma: 1.0,
+            temporal: 1.0,
+        };
+        assert!(shell.chain_replace_gestured(0, bad, gesture).is_err());
+        shell
+            .chain_replace_gestured(0, denoise(9.0), gesture)
+            .expect("the gesture continues after a refusal");
+        assert_eq!(shell.sources[0].undo_depth(), 1, "the refusal added no entry");
+        assert!(shell.undo());
+        assert_eq!(shell.recipe().cloned().expect("recipe"), anchor);
+    }
+
+    #[test]
+    fn gestures_never_coalesce_across_sources() {
+        let mut shell = ShellModel::new();
+        shell.add_to_queue("a.mkv");
+        shell.add_to_queue("b.mkv");
+        shell.select(0);
+        shell.load_recipe(
+            Recipe::new("a.mkv", ExportPreset::Access)
+                .push(ModuleId::Denoise.default_operation()),
+        );
+        let gesture = shell.begin_gesture();
+        shell
+            .chain_replace_gestured(0, denoise(7.0), gesture)
+            .expect("tick");
+
+        shell.select(1);
+        assert!(!shell.can_undo(), "source b has no history of a's gesture");
+        shell.load_recipe(
+            Recipe::new("b.mkv", ExportPreset::Access)
+                .push(ModuleId::Finish.default_operation()),
+        );
+        // Reusing the id on another source cannot merge: the stacks are
+        // separate, so this starts b's own first entry.
+        shell
+            .chain_replace_gestured(0, ModuleId::Finish.default_operation(), gesture)
+            .expect("tick");
+        assert_eq!(shell.sources[1].undo_depth(), 1);
+        shell.select(0);
+        assert_eq!(shell.sources[0].undo_depth(), 1);
+    }
+
+    #[test]
+    fn gesture_entries_round_trip_through_serialization() {
+        let mut shell = ShellModel::new();
+        shell.add_to_queue("a.mkv");
+        shell.load_recipe(
+            Recipe::new("a.mkv", ExportPreset::Access)
+                .push(ModuleId::Denoise.default_operation()),
+        );
+        let gesture = shell.begin_gesture();
+        shell
+            .chain_replace_gestured(0, denoise(11.0), gesture)
+            .expect("tick");
+        shell
+            .chain_replace_gestured(0, denoise(12.0), gesture)
+            .expect("tick");
+        let json = serde_json::to_string(&shell).expect("serialize");
+        let back: ShellModel = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.sources[0].undo_depth(), 1, "coalescing survives saving");
+        assert!(back.undo());
+        match &back.recipe().expect("recipe").operations[0] {
+            // The anchor is the pre-gesture default, temporal strength 3.
+            Operation::Denoise { temporal, .. } => assert_eq!(*temporal, 3.0),
+            other => panic!("expected denoise, got {other:?}"),
+        }
     }
 }

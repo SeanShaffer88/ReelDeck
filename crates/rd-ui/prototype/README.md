@@ -67,6 +67,10 @@ python3 -m http.server -d crates/rd-ui/prototype 8080   # optional
 | `\` · `'` · `Ctrl+1` | Compare · guides · 100 % zoom |
 | `A` · `Alt+↑/↓` · `Delete` · `Alt+Backspace` | Add module · reorder · remove · reset |
 | `Ctrl+Z` · `Ctrl+Shift+Z` (`Ctrl+Y`) | Undo · redo the selected source's chain edits |
+
+A slider drag or numeric-field focus session is one gesture: all its
+intermediate values collapse into a single undo entry, so one `Ctrl+Z`
+restores the value from before the whole drag.
 | `Ctrl+Enter` · `Ctrl+E` · `Ctrl+Shift+Enter` | Preview segment · export panel · render export |
 
 One table, three uses: the palette, the shortcuts sheet and the key bindings
@@ -100,8 +104,9 @@ assets/media/           one generated sample frame
   not yet rendered on a real display by the author of this change (no
   browser in the authoring environment). Treat spacing and contrast as
   designed-but-unconfirmed until the first display pass.
-- **Per-source chains and undo/redo** exist in both surfaces: each source
-  keeps its own chain, evidence and a 100-entry history, mirrored in
+- **Per-source chains, undo/redo and gesture coalescing** exist in both
+  surfaces: each source keeps its own chain, evidence and a 100-entry
+  history, and slider/numeric gestures collapse to one entry, mirrored in
   `crates/rd-ui/src`.
 
 ## Adding to the prototype
