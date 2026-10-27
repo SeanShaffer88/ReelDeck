@@ -487,19 +487,23 @@ impl ShellModel {
                 "no source is selected".to_string(),
             ));
         };
-        let Some(recipe) = source.recipe.as_mut() else {
+        // Lift the recipe out so the history push cannot borrow `source`
+        // while the edit's `&mut Recipe` is alive.
+        let Some(mut recipe) = source.recipe.take() else {
             return Err(ChainEditError::InvalidParameters(
                 "no chain is loaded".to_string(),
             ));
         };
-        source.push_undo(recipe);
-        match edit(recipe) {
+        source.push_undo(&recipe);
+        match edit(&mut recipe) {
             Ok(value) => {
+                source.recipe = Some(recipe);
                 source.redo.clear();
                 source.previewed = false;
                 Ok(value)
             }
             Err(err) => {
+                source.recipe = Some(recipe);
                 source.forget_last_undo();
                 Err(err)
             }
@@ -535,15 +539,16 @@ impl ShellModel {
         let Some(source) = self.source_mut() else {
             return false;
         };
-        let Some(recipe) = source.recipe.as_mut() else {
+        let Some(mut recipe) = source.recipe.take() else {
             return false;
         };
-        source.push_undo(recipe);
+        source.push_undo(&recipe);
         let moved = if earlier {
-            move_step_up(recipe, index)
+            move_step_up(&mut recipe, index)
         } else {
-            move_step_down(recipe, index)
+            move_step_down(&mut recipe, index)
         };
+        source.recipe = Some(recipe);
         if moved {
             source.redo.clear();
             source.previewed = false;
@@ -1048,7 +1053,7 @@ mod tests {
         assert!(back.recipe().is_none());
     }
 
-    fn denoise(temporal: f64) -> Operation {
+    fn denoise(temporal: f32) -> Operation {
         Operation::Denoise {
             engine: DenoiseEngine::Hqdn3d,
             luma: 2.0,
@@ -1229,7 +1234,7 @@ mod tests {
         );
         for i in 0..(UNDO_LIMIT + 5) {
             shell
-                .chain_replace(0, denoise(1.0 + (i as f64 % 18.0)))
+                .chain_replace(0, denoise(1.0 + (i as f32 % 18.0)))
                 .expect("valid replacement");
         }
         assert_eq!(shell.sources[0].undo_depth(), UNDO_LIMIT);
