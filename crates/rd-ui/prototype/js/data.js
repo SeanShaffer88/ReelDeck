@@ -107,7 +107,7 @@
       fieldOrderFlag: "bb",
       audio: "48 kHz · stereo · −21.0 LUFS",
       fixity: { state: "ok", sha256: "3d8a91c05e77b2f4a6d1c8e0934b7f25aa10c6d8e4b93f1702cc5a9d8e6b4f21" },
-      inspect: { state: "done", suggestion: "bff", confirmed: "bff", sampled: "full file" },
+      inspect: { state: "done", suggestion: "bff", confirmed: "bff", sampled: "full file", frames: 47125 },
       idet: { singleTff: 12, singleBff: 604, singleProgressive: 41, singleUndetermined: 118, multiTff: 6, multiBff: 688, multiProgressive: 22, multiUndetermined: 39 },
       signal: { yAvg: 88.4, satAvg: 11.2, toutMax: 0.21, brngMean: 0.004 },
       anomalies: [
@@ -290,6 +290,8 @@
     { id: "source.add", run: "addSource", title: "Add source…", keys: "Ctrl+O", group: "Project", hint: "Sources are hashed on add and never modified.", aliases: "ingest open import file" },
     { id: "source.rehash", run: "rehash", title: "Re-check source fixity", keys: "Ctrl+Shift+H", group: "Project", hint: "Recomputes SHA-256 and compares it with the recorded value.", aliases: "hash verify integrity" },
     { id: "prefs.open", run: "prefs", title: "Preferences…", keys: "Ctrl+,", group: "Project", hint: "", aliases: "settings options theme density" },
+    { id: "edit.undo", run: "undo", title: "Undo chain edit", keys: "Ctrl+Z", group: "Edit", hint: "Reverts the last chain edit on the selected source; each source keeps its own history.", aliases: "revert back history" },
+    { id: "edit.redo", run: "redo", title: "Redo chain edit", keys: "Ctrl+Shift+Z", group: "Edit", hint: "Re-applies an undone chain edit on the selected source. Ctrl+Y also works.", aliases: "repeat forward history" },
     { id: "viewer.program", run: "viewMode", arg: "program", title: "Viewer: program", keys: "P", group: "Viewer", hint: "", aliases: "picture image" },
     { id: "viewer.waveform", run: "viewMode", arg: "waveform", title: "Viewer: waveform", keys: "W", group: "Viewer", hint: "", aliases: "luma levels scope" },
     { id: "viewer.histogram", run: "viewMode", arg: "histogram", title: "Viewer: histogram", keys: "H", group: "Viewer", hint: "", aliases: "distribution levels" },

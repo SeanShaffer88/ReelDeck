@@ -234,17 +234,121 @@ pub struct ChainLine {
     pub preview_gate: Option<String>,
 }
 
+/// Number of chain edits retained per source for undo. The cap keeps a
+/// long session's history bounded; the oldest entry drops off first.
+pub const UNDO_LIMIT: usize = 100;
+
+/// Everything the shell knows about one queued source that is not on the
+/// queue row itself: its recipe, the evidence gathered around it, and its
+/// own undo/redo history.
+///
+/// Chains belong to their source. Switching files in the queue swaps the
+/// whole record, so one file's settings can never describe another file's
+/// picture. The history is per source for the same reason: an undo in one
+/// file never rewinds another.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourceState {
+    /// The chain being edited for this source, when one exists.
+    pub recipe: Option<Recipe>,
+    /// A segment of the current chain rendered successfully.
+    pub previewed: bool,
+    /// The operator overrode the preview gate; the export log records it.
+    pub expert_override: bool,
+    /// The finished output of the last successful export, when one exists.
+    /// Prove stage and verification read this — a proof needs an output.
+    pub exported_output: Option<String>,
+    /// Recipes as they were before each chain edit, oldest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    undo: Vec<Recipe>,
+    /// Recipes rewound by [`SourceState::undo`], consumed again by redo.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    redo: Vec<Recipe>,
+}
+
+impl SourceState {
+    /// Whether an undo is available for this source.
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    /// Whether a redo is available for this source.
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    /// How many edits can currently be undone.
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Remember the current recipe before an edit. A refused edit calls
+    /// [`SourceState::forget_last_undo`], so failed attempts leave no
+    /// history entry.
+    fn push_undo(&mut self, current: &Recipe) {
+        self.undo.push(current.clone());
+        if self.undo.len() > UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+    }
+
+    /// Drop the most recent undo entry after an edit was refused.
+    fn forget_last_undo(&mut self) {
+        self.undo.pop();
+    }
+
+    /// Restore the recipe as it was before the last chain edit. Returns
+    /// `false` when there is nothing to undo.
+    ///
+    /// Undo changes the chain, so the preview flag clears: the restored
+    /// recipe has not itself been previewed in this state, and offering an
+    /// export on a stale preview would break the evidence gate.
+    pub fn undo(&mut self) -> bool {
+        let Some(previous) = self.undo.pop() else {
+            return false;
+        };
+        if let Some(current) = self.recipe.take() {
+            self.redo.push(current);
+        }
+        self.recipe = Some(previous);
+        self.previewed = false;
+        true
+    }
+
+    /// Re-apply an undone edit. The preview rule in [`SourceState::undo`]
+    /// applies here too.
+    pub fn redo(&mut self) -> bool {
+        let Some(next) = self.redo.pop() else {
+            return false;
+        };
+        if let Some(current) = self.recipe.take() {
+            self.undo.push(current);
+        }
+        self.recipe = Some(next);
+        self.previewed = false;
+        true
+    }
+
+    /// Clear both stacks. Loading a fresh recipe is not an edit, so its
+    /// history starts empty.
+    fn clear_history(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+}
+
 /// The whole shell layout state: queue (left), viewer (centre), chain
 /// (right), jobs (bottom) — plus the workflow stage, preferences, and
 /// the measured timeline the centre is drawn over.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ShellModel {
     pub queue: Vec<QueueItem>,
+    /// Per-source working state, parallel to [`ShellModel::queue`]: queue
+    /// row *i* carries its state at `sources[i]`.
+    #[serde(default)]
+    pub sources: Vec<SourceState>,
     pub selected: Option<usize>,
     pub viewer: ViewerState,
-    /// The chain being edited, when a recipe is loaded.
-    #[serde(default)]
-    pub recipe: Option<Recipe>,
     pub jobs: Vec<JobSummary>,
     /// Where the operator is in the workflow.
     #[serde(default)]
@@ -255,16 +359,6 @@ pub struct ShellModel {
     /// not persisted with the shell state.
     #[serde(skip)]
     pub timeline: TimelineModel,
-    /// A segment of the current chain rendered successfully.
-    #[serde(default)]
-    pub previewed: bool,
-    /// The operator overrode the preview gate; the export log records it.
-    #[serde(default)]
-    pub expert_override: bool,
-    /// The finished output of the last successful export, when one exists.
-    /// Prove stage and verification read this — a proof needs an output.
-    #[serde(default)]
-    pub exported_output: Option<String>,
 }
 
 impl ShellModel {
@@ -272,9 +366,11 @@ impl ShellModel {
         Self::default()
     }
 
-    /// Add a file to the queue and select it if nothing is selected.
+    /// Add a file to the queue and select it if nothing is selected. Its
+    /// empty per-source record is created beside the queue row.
     pub fn add_to_queue(&mut self, name: impl Into<String>) {
         self.queue.push(QueueItem::new(name));
+        self.sources.push(SourceState::default());
         if self.selected.is_none() {
             self.selected = Some(self.queue.len() - 1);
         }
@@ -292,9 +388,56 @@ impl ShellModel {
         self.selected.and_then(|i| self.queue.get(i))
     }
 
+    /// The selected source's working state, if a source is selected.
+    pub fn source(&self) -> Option<&SourceState> {
+        self.selected.and_then(|i| self.sources.get(i))
+    }
+
+    /// Mutable access to the selected source's working state.
+    pub fn source_mut(&mut self) -> Option<&mut SourceState> {
+        self.selected.and_then(|i| self.sources.get_mut(i))
+    }
+
+    /// The recipe being edited for the selected source, if any.
+    pub fn recipe(&self) -> Option<&Recipe> {
+        self.source().and_then(|s| s.recipe.as_ref())
+    }
+
+    /// Install a recipe for the selected source — when a saved project
+    /// opens or a source gets its first chain. The undo history does not
+    /// cross a load: the new recipe starts with an empty history and no
+    /// preview evidence. Does nothing without a selection.
+    pub fn load_recipe(&mut self, recipe: Recipe) {
+        if let Some(source) = self.source_mut() {
+            source.recipe = Some(recipe);
+            source.clear_history();
+            source.previewed = false;
+        }
+    }
+
+    /// Whether the selected source has an undo or redo available.
+    pub fn can_undo(&self) -> bool {
+        self.source().is_some_and(SourceState::can_undo)
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.source().is_some_and(SourceState::can_redo)
+    }
+
+    /// Undo the selected source's last chain edit. Returns `false` when
+    /// nothing is selected or its history is empty.
+    pub fn undo(&mut self) -> bool {
+        self.source_mut().is_some_and(SourceState::undo)
+    }
+
+    /// Re-apply an undone chain edit on the selected source.
+    pub fn redo(&mut self) -> bool {
+        self.source_mut().is_some_and(SourceState::redo)
+    }
+
     /// One-line summaries of the loaded chain, for the right panel.
     pub fn chain_summary(&self) -> Vec<String> {
-        match &self.recipe {
+        match self.recipe() {
             Some(recipe) => recipe.operations.iter().map(Operation::summary).collect(),
             None => Vec::new(),
         }
@@ -303,7 +446,7 @@ impl ShellModel {
     /// The chain inspector's rows: summaries, live warnings, and the
     /// preview gate, all derived from the current parameter values.
     pub fn chain_lines(&self) -> Vec<ChainLine> {
-        let Some(recipe) = &self.recipe else {
+        let Some(recipe) = self.recipe() else {
             return Vec::new();
         };
         recipe
@@ -327,87 +470,108 @@ impl ShellModel {
     /// executor uses. `None` when no recipe is loaded; an error when the
     /// planner refuses the chain, which the inspector displays verbatim.
     pub fn chain_filter(&self) -> Option<Result<String, String>> {
-        self.recipe
-            .as_ref()
+        self.recipe()
             .map(|recipe| rd_pipeline::filter_chain(recipe).map_err(|e| e.to_string()))
     }
 
-    /// Add a module to the loaded chain with conservative defaults.
-    pub fn chain_add(&mut self, id: ModuleId) -> Result<usize, ChainEditError> {
-        let recipe = self
-            .recipe
-            .as_mut()
-            .ok_or(ChainEditError::InvalidParameters(
+    /// Run one chain edit against the selected source's recipe, recording
+    /// the previous recipe for undo. A refused edit changes neither the
+    /// chain nor the history, and a successful one clears the redo stack
+    /// because the history has branched.
+    fn edit_recipe<T>(
+        &mut self,
+        edit: impl FnOnce(&mut Recipe) -> Result<T, ChainEditError>,
+    ) -> Result<T, ChainEditError> {
+        let Some(source) = self.source_mut() else {
+            return Err(ChainEditError::InvalidParameters(
+                "no source is selected".to_string(),
+            ));
+        };
+        let Some(recipe) = source.recipe.as_mut() else {
+            return Err(ChainEditError::InvalidParameters(
                 "no chain is loaded".to_string(),
-            ))?;
-        let index = add_module(recipe, id)?;
-        self.previewed = false;
-        Ok(index)
+            ));
+        };
+        source.push_undo(recipe);
+        match edit(recipe) {
+            Ok(value) => {
+                source.redo.clear();
+                source.previewed = false;
+                Ok(value)
+            }
+            Err(err) => {
+                source.forget_last_undo();
+                Err(err)
+            }
+        }
+    }
+
+    /// Add a module to the loaded chain with conservative defaults. The
+    /// edit is undoable per source.
+    pub fn chain_add(&mut self, id: ModuleId) -> Result<usize, ChainEditError> {
+        self.edit_recipe(|recipe| add_module(recipe, id))
     }
 
     /// Remove a step; the removed operation is returned so the shell can
-    /// offer an undo that restores its exact parameters.
+    /// show what an undo will restore.
     pub fn chain_remove(&mut self, index: usize) -> Result<Operation, ChainEditError> {
-        let recipe = self
-            .recipe
-            .as_mut()
-            .ok_or(ChainEditError::InvalidParameters(
-                "no chain is loaded".to_string(),
-            ))?;
-        let removed = remove_step(recipe, index)?;
-        self.previewed = false;
-        Ok(removed)
+        self.edit_recipe(|recipe| remove_step(recipe, index))
     }
 
-    /// Replace a step's parameters; refused values leave the chain
-    /// untouched.
+    /// Replace a step's parameters; refused values leave the chain and
+    /// the undo history untouched.
     pub fn chain_replace(&mut self, index: usize, op: Operation) -> Result<(), ChainEditError> {
-        let recipe = self
-            .recipe
-            .as_mut()
-            .ok_or(ChainEditError::InvalidParameters(
-                "no chain is loaded".to_string(),
-            ))?;
-        replace_step(recipe, index, op)?;
-        self.previewed = false;
-        Ok(())
+        self.edit_recipe(|recipe| replace_step(recipe, index, op))
+    }
+
+    /// Restore one step to its module defaults.
+    pub fn chain_reset(&mut self, index: usize) -> Result<(), ChainEditError> {
+        self.edit_recipe(|recipe| reset_step(recipe, index))
     }
 
     /// Move a step earlier/later. Order is part of the recipe, so any
     /// reorder invalidates a preview of the previous order.
     pub fn chain_move(&mut self, index: usize, earlier: bool) -> bool {
-        let Some(recipe) = self.recipe.as_mut() else {
+        let Some(source) = self.source_mut() else {
             return false;
         };
+        let Some(recipe) = source.recipe.as_mut() else {
+            return false;
+        };
+        source.push_undo(recipe);
         let moved = if earlier {
             move_step_up(recipe, index)
         } else {
             move_step_down(recipe, index)
         };
         if moved {
-            self.previewed = false;
+            source.redo.clear();
+            source.previewed = false;
+        } else {
+            source.forget_last_undo();
         }
         moved
     }
 
     /// Whether a stage may be entered, given what the shell knows.
     pub fn stage_access(&self, stage: Stage) -> StageAccess {
+        let source = self.source();
         stage.access(
             self.selected_item().is_some(),
             self.selected_item()
                 .is_some_and(|i| i.inspect == InspectStatus::Inspected),
-            self.recipe
-                .as_ref()
+            source
+                .and_then(|s| s.recipe.as_ref())
                 .map(|r| r.operations.len())
                 .unwrap_or(0),
-            self.previewed,
-            self.exported_output.is_some(),
+            source.is_some_and(|s| s.previewed),
+            source.is_some_and(|s| s.exported_output.is_some()),
         )
     }
 
     /// The preview gate for the loaded chain, if any.
     pub fn preview_gate(&self) -> Option<String> {
-        self.recipe.as_ref().and_then(preview_required)
+        self.recipe().and_then(preview_required)
     }
 
     /// Whether an export may run without an override: there is a chain to
@@ -418,20 +582,26 @@ impl ShellModel {
     /// and reporting "open" would let the interface offer a render that
     /// cannot run.
     pub fn export_gate_open(&self) -> bool {
-        let Some(recipe) = &self.recipe else {
+        let Some(source) = self.source() else {
+            return false;
+        };
+        let Some(recipe) = &source.recipe else {
             return false;
         };
         if recipe.operations.is_empty() {
             return false;
         }
-        self.preview_gate().is_none() || self.previewed || self.expert_override
+        self.preview_gate().is_none() || source.previewed || source.expert_override
     }
 
     /// What the export panel checks before rendering, filled with the
     /// facts the shell knows. The app adds destination paths, free space,
     /// and an output-size estimate — facts only the filesystem has.
     pub fn export_facts(&self) -> ExportFacts {
-        let chain_len = self
+        let Some(source) = self.source() else {
+            return ExportFacts::default();
+        };
+        let chain_len = source
             .recipe
             .as_ref()
             .map(|r| r.operations.len())
@@ -443,9 +613,9 @@ impl ShellModel {
         ExportFacts {
             chain_len,
             chain_error,
-            previewed: self.previewed,
-            expert_override: self.expert_override,
-            source_pinned: self
+            previewed: source.previewed,
+            expert_override: source.expert_override,
+            source_pinned: source
                 .recipe
                 .as_ref()
                 .is_some_and(|r| r.source_sha256.is_some()),
@@ -506,7 +676,7 @@ mod tests {
         shell.add_to_queue("capture_1987.mkv");
         shell.queue[0].fixity = FixityStatus::Verified;
         shell.queue[0].inspect = InspectStatus::Inspected;
-        shell.recipe = Some(
+        shell.load_recipe(
             Recipe::new("capture_1987.mkv", ExportPreset::PreservationMaster).push(
                 Operation::Deinterlace {
                     engine: DeinterlaceEngine::Bwdif,
@@ -530,6 +700,10 @@ mod tests {
         assert!(shell.chain_filter().is_none());
         assert!(!shell.export_gate_open());
         assert!(shell.chain_add(ModuleId::Denoise).is_err());
+        assert!(!shell.can_undo());
+        assert!(!shell.can_redo());
+        assert!(!shell.undo());
+        assert!(!shell.redo());
     }
 
     #[test]
@@ -596,7 +770,7 @@ mod tests {
         assert_eq!(chain, "bwdif=mode=send_field:parity=tff:deint=all");
         // And it matches what the pipeline would export.
         let plan = rd_pipeline::export_plan(
-            shell.recipe.as_ref().expect("recipe"),
+            shell.recipe().expect("recipe"),
             "capture_1987.mkv",
             "out.mkv",
         )
@@ -607,7 +781,7 @@ mod tests {
     #[test]
     fn planner_refusal_is_surfaced_not_hidden() {
         let mut shell = chain_model();
-        shell.recipe = Some(
+        shell.load_recipe(
             Recipe::new("capture_1987.mkv", ExportPreset::PreservationMaster).push(
                 Operation::Deinterlace {
                     engine: DeinterlaceEngine::Qtgmc,
@@ -640,9 +814,9 @@ mod tests {
             .iter()
             .any(|w| w.contains("twice the frames")));
 
-        shell.previewed = true;
+        shell.sources[0].previewed = true;
         assert!(shell.chain_move(1, true));
-        assert!(!shell.previewed, "a reorder invalidates the preview");
+        assert!(!shell.sources[0].previewed, "a reorder invalidates the preview");
         assert_eq!(shell.chain_lines()[0].module, ModuleId::Denoise);
 
         let removed = shell.chain_remove(0).expect("remove");
@@ -675,14 +849,14 @@ mod tests {
             .iter()
             .all(|c| c.level != CheckLevel::Blocked));
 
-        shell.previewed = true;
+        shell.sources[0].previewed = true;
         assert!(shell.export_gate_open());
-        shell.previewed = false;
-        shell.expert_override = true;
+        shell.sources[0].previewed = false;
+        shell.sources[0].expert_override = true;
         assert!(shell.export_gate_open());
 
         // A refused edit leaves the gate and the chain alone.
-        let before = shell.recipe.clone();
+        let before = shell.recipe().cloned();
         assert!(shell
             .chain_replace(
                 0,
@@ -694,7 +868,7 @@ mod tests {
                 },
             )
             .is_err());
-        assert_eq!(shell.recipe, before);
+        assert_eq!(shell.recipe().cloned(), before);
     }
 
     #[test]
@@ -711,7 +885,7 @@ mod tests {
         );
 
         shell.queue[0].inspect = InspectStatus::Inspected;
-        shell.recipe = Some(
+        shell.load_recipe(
             Recipe::new("a.mkv", ExportPreset::Access).push(ModuleId::Denoise.default_operation()),
         );
         assert!(shell.stage_access(Stage::Decide).available);
@@ -720,10 +894,10 @@ mod tests {
             !shell.stage_access(Stage::Export).available,
             "preview first"
         );
-        shell.previewed = true;
+        shell.sources[0].previewed = true;
         assert!(shell.stage_access(Stage::Export).available);
         assert!(!shell.stage_access(Stage::Prove).available, "no output yet");
-        shell.exported_output = Some("a.restored.mkv".to_string());
+        shell.sources[0].exported_output = Some("a.restored.mkv".to_string());
         assert!(shell.stage_access(Stage::Prove).available);
         assert!(shell.stage_access(Stage::Prove).blocked_by.is_none());
     }
@@ -738,7 +912,11 @@ mod tests {
         assert!(!facts.source_pinned, "the sample recipe pins no hash");
 
         let mut pinned = chain_model();
-        pinned.recipe.as_mut().expect("recipe").source_sha256 = Some("a".repeat(64));
+        pinned.sources[0]
+            .recipe
+            .as_mut()
+            .expect("recipe")
+            .source_sha256 = Some("a".repeat(64));
         assert!(pinned.export_facts().source_pinned);
         let checks = pinned.export_checks();
         assert_eq!(
@@ -749,8 +927,8 @@ mod tests {
                 .level,
             CheckLevel::Pass
         );
-        assert!(!shell.expert_override);
-        assert!(shell.exported_output.is_none());
+        assert!(!shell.sources[0].expert_override);
+        assert!(shell.sources[0].exported_output.is_none());
     }
 
     #[test]
@@ -794,12 +972,13 @@ mod tests {
     fn an_empty_or_absent_chain_never_opens_the_export_gate() {
         let mut shell = ShellModel::new();
         assert!(!shell.export_gate_open(), "no recipe: nothing to export");
-        shell.recipe = Some(Recipe::new("a.mkv", rd_core::ExportPreset::Access));
+        shell.add_to_queue("a.mkv");
+        shell.load_recipe(Recipe::new("a.mkv", rd_core::ExportPreset::Access));
         assert!(
             !shell.export_gate_open(),
             "an empty chain is not an exportable chain"
         );
-        shell.recipe = Some(
+        shell.load_recipe(
             Recipe::new("a.mkv", rd_core::ExportPreset::Access)
                 .push(ModuleId::Finish.default_operation()),
         );
@@ -850,5 +1029,204 @@ mod tests {
         // The measured strip is rebuilt from inspection, not persisted.
         assert_eq!(back.timeline, TimelineModel::default());
         assert_eq!(back.chain_summary(), shell.chain_summary());
+    }
+
+    #[test]
+    fn older_shell_state_without_sources_still_deserializes() {
+        // A shell saved before per-source state existed has no `sources`
+        // field; serde defaults fill an empty store rather than failing.
+        let json = concat!(
+            r#"{"queue":[{"name":"old.mkv","fixity":"pending","inspect":"not_inspected"}],"#,
+            r#""selected":null}"#
+        );
+        let back: ShellModel = serde_json::from_str(json).expect("legacy state deserializes");
+        assert_eq!(back.queue.len(), 1);
+        assert!(back.sources.is_empty());
+        assert!(back.recipe().is_none());
+    }
+
+    fn denoise(temporal: f64) -> Operation {
+        Operation::Denoise {
+            engine: DenoiseEngine::Hqdn3d,
+            luma: 2.0,
+            chroma: 2.0,
+            temporal,
+        }
+    }
+
+    #[test]
+    fn each_source_keeps_its_own_recipe_and_evidence() {
+        let mut shell = ShellModel::new();
+        shell.add_to_queue("a.mkv");
+        shell.add_to_queue("b.mkv");
+        shell.load_recipe(
+            Recipe::new("a.mkv", ExportPreset::Access)
+                .push(ModuleId::Deinterlace.default_operation()),
+        );
+        shell.sources[0].previewed = true;
+        shell.sources[0].exported_output = Some("a.restored.mkv".to_string());
+
+        shell.select(1);
+        assert!(shell.recipe().is_none(), "the second source has no chain yet");
+        assert!(!shell.export_gate_open());
+        shell.load_recipe(
+            Recipe::new("b.mkv", ExportPreset::Access).push(ModuleId::Finish.default_operation()),
+        );
+        assert_eq!(shell.chain_summary().len(), 1);
+
+        // Switching back restores the first source's chain and evidence
+        // untouched: the two records never share state.
+        shell.select(0);
+        assert_eq!(shell.chain_summary().len(), 1);
+        assert_eq!(ModuleId::of(&shell.recipe().unwrap().operations[0]), ModuleId::Deinterlace);
+        assert!(shell.sources[0].previewed);
+        assert_eq!(shell.sources[0].exported_output.as_deref(), Some("a.restored.mkv"));
+        assert!(shell.export_gate_open());
+
+        shell.select(1);
+        assert_eq!(
+            ModuleId::of(&shell.recipe().unwrap().operations[0]),
+            ModuleId::Finish,
+            "the second source's chain is its own"
+        );
+    }
+
+    #[test]
+    fn undo_and_redo_restore_chain_states_per_source() {
+        let mut shell = ShellModel::new();
+        shell.add_to_queue("a.mkv");
+        shell.load_recipe(Recipe::new("a.mkv", ExportPreset::Access));
+        assert!(!shell.can_undo() && !shell.can_redo());
+
+        shell.chain_add(ModuleId::Denoise).expect("add");
+        shell.chain_replace(0, denoise(6.0)).expect("replace");
+        assert_eq!(shell.sources[0].undo_depth(), 2);
+        assert!(shell.can_undo());
+        assert!(!shell.can_redo());
+
+        // Undo restores the default-temporal recipe step by step.
+        assert!(shell.undo());
+        match &shell.recipe().unwrap().operations[0] {
+            Operation::Denoise { temporal, .. } => assert_eq!(*temporal, 3.0),
+            other => panic!("expected denoise, got {other:?}"),
+        }
+        assert!(shell.can_redo());
+        assert!(shell.undo());
+        assert!(shell.recipe().unwrap().operations.is_empty());
+        assert!(!shell.can_undo());
+
+        // Redo walks forward again.
+        assert!(shell.redo());
+        assert_eq!(shell.recipe().unwrap().operations.len(), 1);
+        assert!(shell.redo());
+        match &shell.recipe().unwrap().operations[0] {
+            Operation::Denoise { temporal, .. } => assert_eq!(*temporal, 6.0),
+            other => panic!("expected denoise, got {other:?}"),
+        }
+        assert!(!shell.can_redo());
+
+        // The second source's history is independent.
+        shell.add_to_queue("b.mkv");
+        shell.select(1);
+        assert!(!shell.can_undo(), "undo history does not cross sources");
+        shell.load_recipe(Recipe::new("b.mkv", ExportPreset::Access));
+        shell.chain_add(ModuleId::Finish).expect("add");
+        assert!(shell.can_undo());
+        shell.select(0);
+        assert!(!shell.can_redo(), "source a's redo was not consumed by source b");
+        assert!(shell.can_undo(), "source a's history is untouched by source b");
+    }
+
+    #[test]
+    fn refused_edits_leave_no_history_entry() {
+        let mut shell = ShellModel::new();
+        shell.add_to_queue("a.mkv");
+        shell.load_recipe(
+            Recipe::new("a.mkv", ExportPreset::Access).push(ModuleId::Denoise.default_operation()),
+        );
+        let before = shell.recipe().cloned().unwrap();
+        assert!(shell
+            .chain_replace(
+                0,
+                Operation::Denoise {
+                    engine: DenoiseEngine::Hqdn3d,
+                    luma: 99.0,
+                    chroma: 1.0,
+                    temporal: 1.0,
+                }
+            )
+            .is_err());
+        assert!(!shell.can_undo(), "a refused edit records nothing");
+        assert_eq!(shell.recipe().cloned().unwrap(), before);
+
+        // A no-op reorder is not an edit either.
+        assert!(!shell.chain_move(0, true));
+        assert!(!shell.can_undo());
+    }
+
+    #[test]
+    fn a_new_edit_empties_the_redo_stack() {
+        let mut shell = ShellModel::new();
+        shell.add_to_queue("a.mkv");
+        shell.load_recipe(Recipe::new("a.mkv", ExportPreset::Access));
+        shell.chain_add(ModuleId::Denoise).expect("add one");
+        shell.chain_add(ModuleId::Finish).expect("add two");
+        assert!(shell.undo());
+        assert!(shell.can_redo());
+        // Branching the history discards the redo branch.
+        shell.chain_add(ModuleId::Stabilize).expect("branch");
+        assert!(!shell.can_redo());
+        assert!(shell.can_undo());
+    }
+
+    #[test]
+    fn undo_clears_preview_evidence_and_load_resets_history() {
+        let mut shell = chain_model();
+        shell.sources[0].previewed = true;
+        shell.chain_add(ModuleId::Denoise).expect("add");
+        assert!(!shell.sources[0].previewed, "any edit invalidates the preview");
+        shell.sources[0].previewed = true;
+        assert!(shell.undo());
+        assert!(
+            !shell.sources[0].previewed,
+            "the restored recipe has not itself been previewed"
+        );
+
+        // Loading a recipe starts the history afresh.
+        shell.load_recipe(Recipe::new("capture_1987.mkv", ExportPreset::Access));
+        assert!(!shell.can_undo());
+        assert!(!shell.can_redo());
+        assert!(!shell.sources[0].previewed);
+    }
+
+    #[test]
+    fn undo_history_is_capped() {
+        let mut shell = ShellModel::new();
+        shell.add_to_queue("a.mkv");
+        shell.load_recipe(
+            Recipe::new("a.mkv", ExportPreset::Access).push(ModuleId::Denoise.default_operation()),
+        );
+        for i in 0..(UNDO_LIMIT + 5) {
+            shell
+                .chain_replace(0, denoise(1.0 + (i as f64 % 18.0)))
+                .expect("valid replacement");
+        }
+        assert_eq!(shell.sources[0].undo_depth(), UNDO_LIMIT);
+        // The cap drops the oldest entries; the newest are still reachable.
+        assert!(shell.undo());
+        assert_eq!(shell.sources[0].undo_depth(), UNDO_LIMIT - 1);
+    }
+
+    #[test]
+    fn undo_state_round_trips_through_serialization() {
+        let mut shell = ShellModel::new();
+        shell.add_to_queue("a.mkv");
+        shell.load_recipe(Recipe::new("a.mkv", ExportPreset::Access));
+        shell.chain_add(ModuleId::Finish).expect("add");
+        shell.undo();
+        let json = serde_json::to_string(&shell).expect("serialize");
+        let back: ShellModel = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.sources[0].can_redo(), "the redo stack survives saving");
+        assert!(!back.sources[0].can_undo());
     }
 }

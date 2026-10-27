@@ -85,7 +85,7 @@ leaves the disk.
 | `crates/rd-analyze` | ffprobe / signalstats / detect-filter / idet parsing into a typed inspection model, plus the sampled-range `analyze` pass that runs the tools. |
 | `crates/rd-pipeline` | Planning: recipe → filter strings, two-pass stabilization plan, export argument vectors. Plans only; never executes. |
 | `crates/rd-run` | Execution: runs plans with FFmpeg (fixity gate, never-overwrite, measured progress, cancellation) and writes the recipe + export-log proof beside every output. |
-| `crates/rd-ui` | Interface state model and design system: workflow stages and gates, chain editing and guards, timeline lanes/marks, formatting, preferences, commands, pre-export checks — plus a framework-neutral shell prototype. |
+| `crates/rd-ui` | Interface state model and design system: workflow stages and gates, per-source chain state with undo/redo, chain editing and guards, timeline lanes/marks, formatting, preferences, commands, pre-export checks — plus a framework-neutral shell prototype. |
 | `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `hash`, `version`. |
 
 ## Building from source

@@ -18,6 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-source shell state in `rd-ui`: `ShellModel` now carries one
+  `SourceState` per queue row (parallel to the queue) instead of a single
+  chain, so each source keeps its own recipe, preview evidence, expert
+  override, export result, and undo history. Switching sources swaps the
+  whole record; one file's settings can never describe another file's
+  picture. Legacy shell state without the `sources` field still
+  deserializes to an empty store.
+- Per-source undo/redo over every chain edit (add, remove, reorder,
+  reset, parameter change). Each edit snapshots the recipe first, so
+  refused edits and no-op reorders record nothing; a new edit clears the
+  redo branch; history is bounded at 100 entries per source. Undo and
+  redo clear the preview flag because the restored chain has not itself
+  been previewed. The command table gains an Edit group (`Mod+Z`,
+  `Mod+Shift+Z`), and the prototype renders disabled-until-available
+  history buttons with accessible names and shortcut tooltips.
 - Interface model (`rd-ui`) and a framework-neutral shell prototype. The
   model turns the deferred-shell notes into working rules: the six
   workflow stages with evidence gates (each blocked stage names the missing
@@ -125,6 +140,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prototype: selecting the fully inspected "Church service" sample source
+  crashed the source panel because its sample inspection record was marked
+  done over the full file but carried no analyzed-frame count, which the
+  panel renders as a measurement basis. The record now carries its frame
+  count (47,125 at 25 fps), matching every other completed inspection.
 - Stabilization analysis plan (`vidstabdetect`) aborted outright on
   multi-plane RGB sources (e.g. FFV1 preservation captures) — found
   the first time the plan was executed for real. The analysis pass

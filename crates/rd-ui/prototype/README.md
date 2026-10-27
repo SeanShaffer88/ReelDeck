@@ -38,7 +38,8 @@ python3 -m http.server -d crates/rd-ui/prototype 8080   # optional
 4. **Decide** (`Alt+3`) — expand a step, change its parameters, and watch
    the filter fragment, the live chain, and the planner's verdict update.
    Push temporal denoise above 8 to see the **preview gate** appear. Drag
-   the sliders or type exact numbers.
+   the sliders or type exact numbers. Undo with `Ctrl+Z` (or the header
+   buttons); history is per source and survives switching files.
 5. **Preview** (`Alt+4`) — render a segment (simulated). The job reports
    `measuring…` until a rate exists, then progress, and can be cancelled.
 6. **Export** (`Alt+5`) — pick an intent, read the preflight checks
@@ -65,6 +66,7 @@ python3 -m http.server -d crates/rd-ui/prototype 8080   # optional
 | `P` `W` `H` `U` `F` `D` | Viewer modes |
 | `\` · `'` · `Ctrl+1` | Compare · guides · 100 % zoom |
 | `A` · `Alt+↑/↓` · `Delete` · `Alt+Backspace` | Add module · reorder · remove · reset |
+| `Ctrl+Z` · `Ctrl+Shift+Z` (`Ctrl+Y`) | Undo · redo the selected source's chain edits |
 | `Ctrl+Enter` · `Ctrl+E` · `Ctrl+Shift+Enter` | Preview segment · export panel · render export |
 
 One table, three uses: the palette, the shortcuts sheet and the key bindings
@@ -98,8 +100,9 @@ assets/media/           one generated sample frame
   not yet rendered on a real display by the author of this change (no
   browser in the authoring environment). Treat spacing and contrast as
   designed-but-unconfirmed until the first display pass.
-- **Per-source chains** are demonstrated here but not yet in
-  `crates/rd-ui/src`; that is the next model slice.
+- **Per-source chains and undo/redo** exist in both surfaces: each source
+  keeps its own chain, evidence and a 100-entry history, mirrored in
+  `crates/rd-ui/src`.
 
 ## Adding to the prototype
 

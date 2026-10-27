@@ -1099,6 +1099,9 @@ ul, ol { padding: 0; list-style: none; }
 .chain-head .chain-meta { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
 .chain-head .chain-meta b { font-size: var(--fs-11); font-weight: 600; }
 .chain-head .chain-meta span { font-size: 9.5px; color: var(--text-3); }
+.chain-head .history-btns { display: inline-flex; gap: 2px; }
+.btn.icon-only { width: 24px; padding: 0; }
+.btn.icon-only:disabled { cursor: default; }
 
 /* Chain step cards */
 .chain-list { padding: 6px; display: flex; flex-direction: column; gap: 5px; }

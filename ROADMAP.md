@@ -32,7 +32,7 @@ done when its criteria pass, not when its code merely compiles.
   shipping binary) — see [Interface Design](docs/UI_DESIGN.md)
 - [ ] Shipping shell: framework decision, then binding the real engine
   (measured progress, cancellation) to the layout the prototype proves
-- [ ] Per-source recipes in the shell model; per-file undo/redo
+- [x] Per-source recipes in the shell model; per-file undo/redo
 
 ## v0.3 — The difficult-footage release
 

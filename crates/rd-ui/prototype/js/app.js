@@ -709,6 +709,12 @@
     var html = '<div class="chain-head">' +
       '<div class="chain-meta"><b>Restoration chain</b><span>' + U.esc(clip.name) + " · " + state.chain.length + " step" + (state.chain.length === 1 ? "" : "s") + "</span></div>" +
       '<span class="spacer"></span>' +
+      '<div class="history-btns" role="group" aria-label="Chain edit history">' +
+      '<button class="btn btn-sm btn-ghost icon-only" data-action="undo" ' + (M.canUndo(state) ? "" : "disabled") +
+      ' aria-label="Undo chain edit (Ctrl+Z)" title="Undo — Ctrl+Z">' + U.icon("undo") + "</button>" +
+      '<button class="btn btn-sm btn-ghost icon-only" data-action="redo" ' + (M.canRedo(state) ? "" : "disabled") +
+      ' aria-label="Redo chain edit (Ctrl+Shift+Z)" title="Redo — Ctrl+Shift+Z">' + U.icon("redo") + "</button>" +
+      "</div>" +
       '<button class="btn btn-sm" data-action="addModule" aria-haspopup="dialog" title="Add a module — A">' +
       U.icon("plus") + "<span>Module</span></button>" +
       "</div>";
@@ -1278,8 +1284,14 @@
     if (id === state.selectedId) return;
     // Chains belong to their source: swap the working chain out and the
     // selected clip's chain in, so one file's settings never describe
-    // another file's picture.
+    // another file's picture. Its evidence travels with it the same way.
     state.chains[state.selectedId] = state.chain;
+    state.sourceFlags[state.selectedId] = {
+      previewed: state.previewed,
+      override: state.override,
+      exported: state.exported,
+      verified: state.verified
+    };
     state.selectedId = id;
     if (!state.chains[id]) {
       var target = M.clipMeta(state);
@@ -1298,10 +1310,11 @@
     state.chain = state.chains[id];
     state.range = null;
     state.viewer.playhead = 0;
-    state.previewed = false;
-    state.override = false;
-    state.exported = null;
-    state.verified = null;
+    var savedFlags = state.sourceFlags[id] || {};
+    state.previewed = !!savedFlags.previewed;
+    state.override = !!savedFlags.override;
+    state.exported = savedFlags.exported || null;
+    state.verified = savedFlags.verified || null;
     state.viewer.compare = false;
     selectedStep = 0;
     renderQueue();
@@ -1489,6 +1502,8 @@
       case "moveStep": moveSelectedStep(cmd.arg); break;
       case "removeStep": removeSelectedStep(); break;
       case "resetStep": resetSelectedStep(); break;
+      case "undo": undoEdit(); break;
+      case "redo": redoEdit(); break;
       case "renderPreview": renderPreview(); break;
       case "renderExport": openExport(); break;
       case "verify": verifyExport(); break;
@@ -1699,6 +1714,36 @@
     toast("ok", D.modules[step.module].label + " reset", "Back to the module's conservative defaults.");
   }
 
+  // History is per source: the model keeps one undo/redo stack per clip,
+  // so these act on the selected source's chain only.
+  function undoEdit() {
+    var res = M.undo(state);
+    if (!res.ok) {
+      toast("warn", "Nothing to undo", "No earlier chain edit exists for this source.");
+      return;
+    }
+    selectedStep = Math.max(0, Math.min(selectedStep, state.chain.length - 1));
+    renderInspector();
+    renderContext();
+    renderStages();
+    announce("Undid the last chain edit.");
+    toast("ok", "Undone", "The chain now has " + state.chain.length + " step" + (state.chain.length === 1 ? "" : "s") + ".");
+  }
+
+  function redoEdit() {
+    var res = M.redo(state);
+    if (!res.ok) {
+      toast("warn", "Nothing to redo", "No undone chain edit exists for this source.");
+      return;
+    }
+    selectedStep = Math.max(0, Math.min(selectedStep, state.chain.length - 1));
+    renderInspector();
+    renderContext();
+    renderStages();
+    announce("Redid the chain edit.");
+    toast("ok", "Redone", "The chain now has " + state.chain.length + " step" + (state.chain.length === 1 ? "" : "s") + ".");
+  }
+
   // ------------------------------------------------------------------ keys
   function signature(e) {
     var mods = [];
@@ -1899,6 +1944,8 @@
         selectedStep = Number(target.dataset.index);
         resetSelectedStep();
         break;
+      case "undo": undoEdit(); break;
+      case "redo": redoEdit(); break;
       case "set-param": {
         var index = Number(target.dataset.index);
         var patch = {};
@@ -2104,6 +2151,9 @@
     var map = {
       "Ctrl+K": "help.palette",
       "Ctrl+,": "prefs.open",
+      "Ctrl+Z": "edit.undo",
+      "Ctrl+Shift+Z": "edit.redo",
+      "Ctrl+Y": "edit.redo",
       "Ctrl+O": "source.add",
       "Ctrl+Shift+H": "source.rehash",
       "Ctrl+E": "export.open",

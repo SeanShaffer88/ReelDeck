@@ -37,6 +37,8 @@
     "arrow-down": '<path d="M12 5v14M6 13l6 6 6-6"/>',
     "trash": '<path d="M4.5 7h15M9.5 7V4.8h5V7M6.5 7l1 13h9l1-13"/><path d="M10.5 10.5v6M13.5 10.5v6"/>',
     "reset": '<path d="M4.5 10.5A7.8 7.8 0 1 1 6 16.4"/><path d="M4 4.5v6h6"/>',
+    "undo": '<path d="M3.5 7.5v5.5h5.5"/><path d="M3.5 13a8.5 8.5 0 1 1 2.6 5.2"/>',
+    "redo": '<path d="M20.5 7.5v5.5H15"/><path d="M20.5 13a8.5 8.5 0 1 0-2.6 5.2"/>',
     "info": '<circle cx="12" cy="12" r="9"/><path d="M12 10.6V17"/><circle cx="12" cy="7.6" r=".9" fill="currentColor" stroke="none"/>',
     "spark": '<path d="M12 3l1.9 5.6 5.6 1.9-5.6 1.9L12 18l-1.9-5.6L4.5 10.5l5.6-1.9z"/>',
     "layers": '<path d="M12 3.5l8.5 4.5L12 12.5 3.5 8z"/><path d="M3.5 12.5L12 17l8.5-4.5M3.5 16.5L12 21l8.5-4.5"/>',

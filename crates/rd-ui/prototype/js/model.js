@@ -18,6 +18,10 @@
     scale: [16, 7680]
   };
 
+  // Mirrors UNDO_LIMIT in crates/rd-ui/src/lib.rs: per-source chain
+  // history is bounded, oldest entry first.
+  var UNDO_LIMIT = 100;
+
   function defaultPrefs() {
     return {
       density: "compact",
@@ -38,6 +42,12 @@
     return {
       selectedId: "04",
       chains: chains,
+      // Per-source chain history: { [clipId]: { undo: [], redo: [] } }.
+      // Undo never crosses from one source to another.
+      history: {},
+      // Per-source evidence flags, swapped alongside the chain so a
+      // preview or export stays attached to its own file.
+      sourceFlags: {},
       stage: "ingest",
       tab: "chain",
       chain: chain,
@@ -126,6 +136,59 @@
     return state.chain.some(function (s) { return s.module === id; });
   }
 
+  // ------------------------------------------------------------- history
+  function historyFor(state) {
+    var id = state.selectedId;
+    if (!state.history[id]) state.history[id] = { undo: [], redo: [] };
+    return state.history[id];
+  }
+
+  function cloneChain(chain) {
+    return chain.map(function (s) {
+      return { module: s.module, params: Object.assign({}, s.params), open: !!s.open };
+    });
+  }
+
+  /** Remember the chain before a successful edit; a new edit clears redo. */
+  function snapshot(state) {
+    var h = historyFor(state);
+    h.undo.push(cloneChain(state.chain));
+    if (h.undo.length > UNDO_LIMIT) h.undo.shift();
+    h.redo = [];
+  }
+
+  function canUndo(state) {
+    return historyFor(state).undo.length > 0;
+  }
+
+  function canRedo(state) {
+    return historyFor(state).redo.length > 0;
+  }
+
+  /** Restore the previous chain. Refused when there is nothing to undo. */
+  function undo(state) {
+    var h = historyFor(state);
+    if (!h.undo.length) return { ok: false };
+    h.redo.push(cloneChain(state.chain));
+    state.chain = h.undo.pop();
+    state.chains[state.selectedId] = state.chain;
+    // The restored chain has not itself been previewed in this state.
+    state.previewed = false;
+    state.selectedStep = Math.max(0, Math.min(state.selectedStep || 0, state.chain.length - 1));
+    return { ok: true };
+  }
+
+  function redo(state) {
+    var h = historyFor(state);
+    if (!h.redo.length) return { ok: false };
+    h.undo.push(cloneChain(state.chain));
+    state.chain = h.redo.pop();
+    state.chains[state.selectedId] = state.chain;
+    state.previewed = false;
+    state.selectedStep = Math.max(0, Math.min(state.selectedStep || 0, state.chain.length - 1));
+    return { ok: true };
+  }
+
   function findStep(state, moduleId) {
     return state.chain.findIndex(function (s) { return s.module === moduleId; });
   }
@@ -142,6 +205,7 @@
     for (var i = 0; i < state.chain.length; i++) {
       if (rank(state.chain[i].module) > rank(id)) { index = i; break; }
     }
+    snapshot(state);
     state.chain.splice(index, 0, { module: id, params: Object.assign({}, D.modules[id].defaults), open: true });
     state.selectedStep = index;
     state.previewed = false;
@@ -150,6 +214,7 @@
 
   function removeStep(state, index) {
     if (index < 0 || index >= state.chain.length) return { ok: false, error: "Step " + (index + 1) + " no longer exists; the chain changed." };
+    snapshot(state);
     var removed = state.chain.splice(index, 1)[0];
     state.selectedStep = Math.max(0, Math.min(index, state.chain.length - 1));
     state.previewed = false;
@@ -160,6 +225,7 @@
     if (hasModule(state, step.module)) {
       return { ok: false, error: D.modules[step.module].label + " is already in the chain." };
     }
+    snapshot(state);
     state.chain.splice(Math.max(0, Math.min(index, state.chain.length)), 0, step);
     state.previewed = false;
     return { ok: true };
@@ -169,6 +235,7 @@
     var target = index + direction;
     if (index < 0 || index >= state.chain.length) return false;
     if (target < 0 || target >= state.chain.length) return false;
+    snapshot(state);
     var tmp = state.chain[index];
     state.chain[index] = state.chain[target];
     state.chain[target] = tmp;
@@ -184,6 +251,7 @@
     var next = Object.assign({}, step.params, patch);
     var error = validateParams(step.module, next);
     if (error) return { ok: false, error: error };
+    snapshot(state);
     step.params = next;
     state.previewed = false;
     return { ok: true };
@@ -522,6 +590,10 @@
     moveStep: moveStep,
     updateParams: updateParams,
     validateParams: validateParams,
+    canUndo: canUndo,
+    canRedo: canRedo,
+    undo: undo,
+    redo: redo,
     filterFor: filterFor,
     chainFilter: chainFilter,
     summaryFor: summaryFor,
