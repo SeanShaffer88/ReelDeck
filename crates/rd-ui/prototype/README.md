@@ -67,9 +67,9 @@ python3 -m http.server -d crates/rd-ui/prototype 8080   # optional
 | `A` · `Alt+↑/↓` · `Delete` · `Alt+Backspace` | Add module · reorder · remove · reset |
 | `Ctrl+Enter` · `Ctrl+E` · `Ctrl+Shift+Enter` | Preview segment · export panel · render export |
 
-Five regional notes: the palette and the shortcuts sheet are generated from
-the same `COMMANDS` table, so a chord shown in one is the chord bound in the
-other.
+One table, three uses: the palette, the shortcuts sheet and the key bindings
+all come from the same `COMMANDS` table, so a chord shown in the sheet is the
+chord that actually runs.
 
 ## Files
 
