@@ -45,12 +45,6 @@ pub use prefs::{Accent, Density, TimeDisplay, WorkspacePrefs};
 pub use stages::{Stage, StageAccess};
 pub use timeline::{MarkKind, MetricLane, RangeSelection, TimelineMark, TimelineModel};
 
-impl Default for Stage {
-    fn default() -> Self {
-        Stage::Ingest
-    }
-}
-
 impl Default for TimelineModel {
     fn default() -> Self {
         TimelineModel::new(0.0, FrameRate::FALLBACK)
@@ -516,7 +510,7 @@ mod tests {
 
     #[test]
     fn empty_shell_has_no_selection_and_no_chain() {
-        let shell = ShellModel::new();
+        let mut shell = ShellModel::new();
         assert!(shell.selected_item().is_none());
         assert!(shell.chain_summary().is_empty());
         assert_eq!(shell.viewer.mode, ViewerMode::Program);

@@ -932,6 +932,7 @@ mod tests {
             source_pinned: true,
             free_bytes: Some(10_000_000_000),
             estimated_bytes: Some(1_000_000_000),
+            ..Default::default()
         });
         assert_eq!(
             fits.iter().find(|c| c.id == "space").unwrap().level,
@@ -944,6 +945,7 @@ mod tests {
             source_pinned: true,
             free_bytes: Some(1_050_000_000),
             estimated_bytes: Some(1_000_000_000),
+            ..Default::default()
         });
         let space = short.iter().find(|c| c.id == "space").unwrap();
         assert_eq!(space.level, CheckLevel::Blocked);
@@ -954,6 +956,7 @@ mod tests {
             previewed: true,
             source_pinned: true,
             free_bytes: Some(500_000_000),
+            ..Default::default()
         });
         let space = free_only.iter().find(|c| c.id == "space").unwrap();
         assert_eq!(space.level, CheckLevel::Unknown);

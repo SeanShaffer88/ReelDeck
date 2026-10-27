@@ -80,7 +80,7 @@ impl MetricLane {
     /// Where a value sits in the lane, 0 at the bottom and 1 at the top.
     pub fn normalized(&self, value: f64) -> f64 {
         let (lo, hi) = self.domain();
-        if !(hi > lo) || !value.is_finite() {
+        if hi <= lo || !value.is_finite() {
             return 0.0;
         }
         ((value - lo) / (hi - lo)).clamp(0.0, 1.0)
@@ -651,9 +651,9 @@ mod tests {
             },
         ]);
         t.seek_secs(10.0);
-        let next = t.next_mark().expect("next mark");
+        let next = t.next_mark().expect("next mark").clone();
         assert_eq!(next.start_secs, 30.0);
-        assert_eq!(t.jump_to(next), 30.0);
+        assert_eq!(t.jump_to(&next), 30.0);
         let prev = t.previous_mark().expect("previous mark");
         assert_eq!(prev.start_secs, 5.0);
         t.seek_secs(0.0);

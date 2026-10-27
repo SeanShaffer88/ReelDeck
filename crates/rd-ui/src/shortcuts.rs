@@ -527,15 +527,15 @@ mod tests {
     fn lookup_and_groups_read_from_the_single_table() {
         assert_eq!(by_id("export.run").map(|c| c.title), Some("Render export"));
         assert!(by_id("no.such.command").is_none());
-        let groups = groups();
-        assert_eq!(groups.first(), Some(&"Workflow"));
-        assert!(groups.contains(&"Chain"));
+        let group_names = groups();
+        assert_eq!(group_names.first(), Some(&"Workflow"));
+        assert!(group_names.contains(&"Chain"));
         assert_eq!(
             in_group("Chain").len(),
             COMMANDS.iter().filter(|c| c.group == "Chain").count()
         );
         assert_eq!(
-            groups().iter().map(|g| in_group(g).len()).sum::<usize>(),
+            group_names.iter().map(|g| in_group(g).len()).sum::<usize>(),
             COMMANDS.len(),
             "every command belongs to a listed group"
         );

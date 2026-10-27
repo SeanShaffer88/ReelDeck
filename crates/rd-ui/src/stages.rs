@@ -10,10 +10,11 @@
 use serde::{Deserialize, Serialize};
 
 /// One stage of the restoration workflow, in order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
     /// Add sources; compute fixity; capture probe facts.
+    #[default]
     Ingest,
     /// Measure the signal and read the findings.
     Inspect,
