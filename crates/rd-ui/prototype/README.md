@@ -40,8 +40,11 @@ python3 -m http.server -d crates/rd-ui/prototype 8080   # optional
    Push temporal denoise above 8 to see the **preview gate** appear. Drag
    the sliders or type exact numbers. Undo with `Ctrl+Z` (or the header
    buttons); history is per source and survives switching files.
-5. **Preview** (`Alt+4`) — render a segment (simulated). The job reports
-   `measuring…` until a rate exists, then progress, and can be cancelled.
+5. **Preview** (`Alt+4`) — render a segment (simulated). The job moves
+   Queued → Running with measured progress, shows `Cancelling` while a
+   cancel drains, then ends `Cancelled`; let it finish and it ends `Done`
+   with its proof note. Jobs without a known frame total stay on
+   `measuring…` rather than inventing a percentage.
 6. **Export** (`Alt+5`) — pick an intent, read the preflight checks
    (`PASS` / `CHECK` / `FAIL` / `SKIP`), and open the confirmation: it lists
    the exact command that would run, the estimate, and the proof sidecars.
@@ -85,7 +88,7 @@ styles/tokens.css       colour, type, density, contrast, motion
 styles/app.css          layout, components, responsive rules
 js/format.js            timecode, durations, bytes, rates, hashes
 js/data.js              sample project, catalogs, deterministic series
-js/model.js             stage gates, chain rules, filter text, preflight
+js/model.js             stage gates, chain rules, filter text, preflight, job journal
 js/components.js        icons, pills, scope and lane drawing
 js/app.js               rendering, events, dialogs, keyboard, jobs
 assets/media/           one generated sample frame
@@ -93,9 +96,13 @@ assets/media/           one generated sample frame
 
 ## Honest limitations
 
-- **Simulated jobs.** Progress is a simulation for design review, labelled
-  `Simulated in this prototype`; the real shell reports measured engine
-  progress.
+- **Simulated jobs.** Only the clock is simulated: `js/app.js` drives the
+  same lifecycle, measured-only progress rules, cooperative cancellation
+  and 100-entry cap that `crates/rd-ui/src/jobs.rs` enforces, with the
+  rules living in `js/model.js`, not in the timer. Each row is labelled
+  `Simulated in this prototype`; the real shell forwards `rd-run`
+  `Progress` blocks and `RunReport` outcomes to the identical state
+  machine.
 - **One sample frame.** Before/after, field split and temporal difference
   are styles over that frame, not decoded video.
 - **No file access.** Adding files and disk-space measurements belong to
@@ -104,9 +111,10 @@ assets/media/           one generated sample frame
   not yet rendered on a real display by the author of this change (no
   browser in the authoring environment). Treat spacing and contrast as
   designed-but-unconfirmed until the first display pass.
-- **Per-source chains, undo/redo and gesture coalescing** exist in both
-  surfaces: each source keeps its own chain, evidence and a 100-entry
-  history, and slider/numeric gestures collapse to one entry, mirrored in
+- **Per-source chains, undo/redo, gesture coalescing and the job journal**
+  exist in both surfaces: each source keeps its own chain, evidence and a
+  100-entry history, slider/numeric gestures collapse to one entry, and
+  jobs follow the same six-state lifecycle, mirrored in
   `crates/rd-ui/src`.
 
 ## Adding to the prototype

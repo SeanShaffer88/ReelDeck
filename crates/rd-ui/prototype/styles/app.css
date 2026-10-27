@@ -1018,7 +1018,10 @@ ul, ol { padding: 0; list-style: none; }
   transition: width var(--dur-2) linear;
 }
 .progress[data-state="done"] > span { background: var(--ok); }
-.progress[data-state="error"] > span { background: var(--err); }
+.progress[data-state="failed"] > span { background: var(--err); }
+.progress[data-state="cancelled"] > span { background: var(--text-4); }
+.progress[data-state="cancelling"] > span { background: var(--warn); }
+.progress[data-state="queued"] > span { background: var(--text-4); }
 .job-percent {
   font-family: var(--font-mono);
   font-size: 10px;

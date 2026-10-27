@@ -596,6 +596,137 @@
     };
   }
 
+  // ------------------------------------------------------------- jobs
+  // Mirror of crates/rd-ui/src/jobs.rs: an explicit lifecycle with
+  // measured-only progress and cooperative cancellation. The app's
+  // timers simulate the engine; these rules are the contract.
+  var jobSeq = 0;
+  var JOB_HISTORY_LIMIT = 100;
+
+  function jobWord(stateName) {
+    return {
+      queued: "Queued",
+      running: "Running",
+      cancelling: "Cancelling",
+      done: "Done",
+      failed: "Failed",
+      cancelled: "Cancelled"
+    }[stateName] || stateName;
+  }
+
+  /** Accept a job (Queued). Returns its id. totalFrames, when known,
+      turns measured frame counts into an honest percentage. */
+  function enqueueJob(state, opts) {
+    var id = "job-" + (++jobSeq);
+    state.jobs.push({
+      id: id,
+      label: opts.label,
+      sub: opts.sub || "",
+      kind: opts.kind,
+      sourceId: opts.sourceId == null ? state.selectedId : opts.sourceId,
+      totalFrames: opts.totalFrames == null ? null : opts.totalFrames,
+      state: "queued",
+      progress: { frames: 0, fps: 0, speed: 0, outTimeUs: 0, totalSize: 0, percent: null },
+      outcome: null,
+      note: ""
+    });
+    if (state.jobs.length > JOB_HISTORY_LIMIT) {
+      // Evict the oldest terminal entry, never an active one.
+      var idx = -1;
+      for (var i = 0; i < state.jobs.length; i++) {
+        if (["done", "failed", "cancelled"].indexOf(state.jobs[i].state) >= 0) { idx = i; break; }
+      }
+      state.jobs.splice(idx < 0 ? 0 : idx, 1);
+    }
+    return id;
+  }
+
+  function findJob(state, id) {
+    for (var i = 0; i < state.jobs.length; i++) {
+      if (state.jobs[i].id === id) return state.jobs[i];
+    }
+    return null;
+  }
+
+  function illegal(job, to) {
+    return { ok: false, error: "job " + (job ? job.id : "?") + " cannot move to " + to + " from " + (job ? job.state : "unknown") };
+  }
+
+  /** Queued → Running. */
+  function startJobModel(state, id) {
+    var job = findJob(state, id);
+    if (!job) return { ok: false, error: "unknown job " + id };
+    if (job.state !== "queued") return illegal(job, "running");
+    job.state = "running";
+    return { ok: true };
+  }
+
+  /** Apply one measured engine block while running or cancelling. */
+  function jobProgress(state, id, measured) {
+    var job = findJob(state, id);
+    if (!job) return { ok: false, error: "unknown job " + id };
+    if (job.state !== "running" && job.state !== "cancelling") return illegal(job, "running");
+    job.progress.frames = measured.frame || 0;
+    job.progress.fps = measured.fps || 0;
+    job.progress.speed = measured.speed || 0;
+    job.progress.outTimeUs = measured.outTimeUs || 0;
+    job.progress.totalSize = measured.totalSize || 0;
+    if (job.totalFrames) {
+      job.progress.percent = Math.min(100, Math.round((job.progress.frames * 100) / job.totalFrames));
+    } else {
+      job.progress.percent = null;
+    }
+    return { ok: true };
+  }
+
+  /** Running → Cancelling; idempotent while already cancelling. */
+  function requestCancel(state, id) {
+    var job = findJob(state, id);
+    if (!job) return { ok: false, error: "unknown job " + id };
+    if (job.state === "cancelling") return { ok: true };
+    if (job.state !== "running") return illegal(job, "cancelling");
+    job.state = "cancelling";
+    return { ok: true };
+  }
+
+  /** Only a running job can succeed; a cancelled one cannot also succeed. */
+  function succeedJob(state, id, outcome) {
+    var job = findJob(state, id);
+    if (!job) return { ok: false, error: "unknown job " + id };
+    if (job.state !== "running") return illegal(job, "done");
+    job.state = "done";
+    job.progress.percent = 100;
+    job.outcome = outcome || null;
+    job.note = "complete";
+    // Evidence wiring mirrors ShellModel::job_succeeded.
+    if (job.kind === "preview") {
+      state.previewed = true;
+      if (state.sourceFlags[state.selectedId]) state.sourceFlags[state.selectedId].previewed = true;
+      else state.sourceFlags[state.selectedId] = { previewed: true, override: false, exported: null, verified: null };
+    }
+    return { ok: true };
+  }
+
+  function failJob(state, id, detail) {
+    var job = findJob(state, id);
+    if (!job) return { ok: false, error: "unknown job " + id };
+    if (["done", "failed", "cancelled"].indexOf(job.state) >= 0) return illegal(job, "failed");
+    job.state = "failed";
+    job.note = detail || "failed";
+    return { ok: true };
+  }
+
+  /** Cancelling → Cancelled: the engine stopped and removed partial output. */
+  function confirmCancelled(state, id) {
+    var job = findJob(state, id);
+    if (!job) return { ok: false, error: "unknown job " + id };
+    if (job.state !== "cancelling") return illegal(job, "cancelled");
+    job.state = "cancelled";
+    job.note = "cancelled";
+    job.progress.percent = null;
+    return { ok: true };
+  }
+
   global.RD.model = {
     LIMITS: LIMITS,
     defaultPrefs: defaultPrefs,
@@ -618,6 +749,14 @@
     undo: undo,
     redo: redo,
     beginGesture: beginGesture,
+    enqueueJob: enqueueJob,
+    startJobModel: startJobModel,
+    jobProgress: jobProgress,
+    requestCancel: requestCancel,
+    confirmCancelled: confirmCancelled,
+    succeedJob: succeedJob,
+    failJob: failJob,
+    jobWord: jobWord,
     filterFor: filterFor,
     chainFilter: chainFilter,
     summaryFor: summaryFor,
