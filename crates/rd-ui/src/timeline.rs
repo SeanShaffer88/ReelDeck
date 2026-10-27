@@ -358,12 +358,29 @@ impl TimelineModel {
         self.playhead_secs = secs.clamp(0.0, self.duration_secs);
     }
 
+    /// Follow a position from the viewer.
+    ///
+    /// A strip with no measured span (`duration_secs == 0`) is *unmeasured*
+    /// rather than zero-length: it still tracks the playhead so the readout
+    /// and the viewer agree. Once a duration is known, positions clamp into
+    /// it as usual.
+    pub fn track_playhead(&mut self, secs: f64) {
+        if !secs.is_finite() {
+            return;
+        }
+        if self.duration_secs > 0.0 {
+            self.playhead_secs = secs.clamp(0.0, self.duration_secs);
+        } else {
+            self.playhead_secs = secs.max(0.0);
+        }
+    }
+
     /// Step whole frames from the current position. Sub-frame positions
     /// are snapped to a frame first, so stepping is predictable.
     pub fn step_frames(&mut self, delta: i64) {
         let frame = self.frame() as i64 + delta;
         let frame = frame.max(0) as u64;
-        self.seek_secs(self.rate.secs_for_frame(frame));
+        self.track_playhead(self.rate.secs_for_frame(frame));
     }
 
     pub fn begin_selection(&mut self, secs: f64) {
@@ -613,6 +630,23 @@ mod tests {
         t.step_frames(5);
         assert_eq!(t.frame(), 5);
         assert!((t.playhead_secs - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_unmeasured_strip_still_tracks_the_playhead() {
+        let mut t = TimelineModel::new(0.0, PAL);
+        t.track_playhead(3.5);
+        assert_eq!(t.playhead_secs, 3.5, "no measured span: nothing to clamp to");
+        t.track_playhead(-2.0);
+        assert_eq!(t.playhead_secs, 0.0);
+        t.track_playhead(f64::NAN);
+        assert_eq!(t.playhead_secs, 0.0, "a NaN position is ignored");
+        t.step_frames(25);
+        assert!((t.playhead_secs - 1.0).abs() < 1e-9);
+        // With a duration, positions clamp into the measured span.
+        t.duration_secs = 0.5;
+        t.track_playhead(10.0);
+        assert_eq!(t.playhead_secs, 0.5);
     }
 
     #[test]

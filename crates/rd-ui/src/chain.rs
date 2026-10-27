@@ -339,42 +339,61 @@ fn step_preview_reason(op: &Operation) -> Option<String> {
 /// Each is a consequence, not a scold.
 pub fn parameter_watch_points(op: &Operation) -> Vec<String> {
     let mut out = Vec::new();
-    match op {
-        Operation::Deinterlace {
-            output_rate: OutputRate::SendField,
-            ..
-        } => out.push(
-            "One frame per field: the output has twice the frames of the source (25i → 50p). \
-             The master will be roughly twice the size and the render twice as long."
+    // These are independent observations, not alternatives: a send_field
+    // step with auto field order has both consequences, and the operator
+    // has to read both. (A `match` here silently dropped the second one.)
+    if let Operation::Deinterlace { output_rate, .. } = op {
+        if *output_rate == OutputRate::SendField {
+            out.push(
+                "One frame per field: the output has twice the frames of the source \
+                 (25i → 50p). The master will be roughly twice the size and the render \
+                 twice as long."
+                    .to_string(),
+            );
+        }
+    }
+    if let Operation::Deinterlace {
+        field_order: FieldOrder::Auto,
+        ..
+    } = op
+    {
+        out.push(
+            "Auto follows the stream's field-order flag. When a capture's flag is wrong, \
+             force the order the preview shows as correct."
                 .to_string(),
-        ),
-        Operation::Deinterlace {
-            field_order: FieldOrder::Auto,
-            ..
-        } => out.push(
-            "Auto follows the stream's field-order flag. When a capture's flag is wrong, force \
-             the order the preview shows as correct."
-                .to_string(),
-        ),
-        Operation::Stabilize { tripod: true, .. } => out.push(
+        );
+    }
+    if let Operation::Stabilize { tripod: true, .. } = op {
+        out.push(
             "Tripod mode holds every shot still, including deliberate camera moves. \
              It suits locked-off transfers, not handheld footage."
                 .to_string(),
-        ),
-        Operation::Denoise { temporal, .. } if *temporal > 0.0 => out.push(
-            "Temporal denoise compares neighbouring frames; fast motion and flashes can smear. \
-             Zero it to leave grain alone."
+        );
+    }
+    if let Operation::Denoise { temporal, .. } = op {
+        if *temporal > 8.0 {
+            out.push(format!(
+                "Temporal strength {temporal} smears motion and erases grain. Preview a \
+                 moving shot before committing."
+            ));
+        } else if *temporal > 0.0 {
+            out.push(
+                "Temporal denoise compares neighbouring frames; fast motion and flashes \
+                 can smear. Zero it to leave grain alone."
+                    .to_string(),
+            );
+        }
+    }
+    if let Operation::Finish {
+        normalize_levels: true,
+        ..
+    } = op
+    {
+        out.push(
+            "Level correction moves values that were out of broadcast range. It clips by \
+             definition; a preservation master may prefer the untouched range."
                 .to_string(),
-        ),
-        Operation::Finish {
-            normalize_levels: true,
-            ..
-        } => out.push(
-            "Level correction moves values that were out of broadcast range. \
-             It clips by definition; a preservation master may prefer the untouched range."
-                .to_string(),
-        ),
-        _ => {}
+        );
     }
     out
 }
@@ -806,8 +825,14 @@ mod tests {
             only_flagged: false,
         };
         let points = parameter_watch_points(&send_field);
-        assert!(points.iter().any(|p| p.contains("twice the frames")));
-        assert!(points.iter().any(|p| p.contains("field-order flag")));
+        assert!(
+            points.iter().any(|p| p.contains("twice the frames")),
+            "the doubled frame count is stated: {points:?}"
+        );
+        assert!(
+            points.iter().any(|p| p.contains("field-order flag")),
+            "auto field order is explained too, not instead: {points:?}"
+        );
 
         let tripod = Operation::Stabilize {
             smoothing: 15,

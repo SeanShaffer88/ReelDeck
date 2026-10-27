@@ -410,9 +410,20 @@ impl ShellModel {
         self.recipe.as_ref().and_then(preview_required)
     }
 
-    /// Whether an export may run without an override: a preview of this
-    /// chain exists, or the operator has recorded an override.
+    /// Whether an export may run without an override: there is a chain to
+    /// export, and either it needs no preview, or this chain has been
+    /// previewed, or the operator has recorded an override.
+    ///
+    /// No chain means the gate is *not* open: there is nothing to deliver,
+    /// and reporting "open" would let the interface offer a render that
+    /// cannot run.
     pub fn export_gate_open(&self) -> bool {
+        let Some(recipe) = &self.recipe else {
+            return false;
+        };
+        if recipe.operations.is_empty() {
+            return false;
+        }
         self.preview_gate().is_none() || self.previewed || self.expert_override
     }
 
@@ -463,7 +474,7 @@ impl ShellModel {
 
     /// Seek both the viewer and the playhead from a timeline click.
     pub fn seek_secs(&mut self, secs: f64) {
-        self.timeline.seek_secs(secs);
+        self.timeline.track_playhead(secs);
         self.viewer.current_frame = self.timeline.frame();
     }
 
@@ -777,6 +788,35 @@ mod tests {
         assert_eq!(shell.position_text(), "300");
         let suggestion = shell.timeline.suggested_preview_range(10.0).expect("range");
         assert!((suggestion.in_secs - 7.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_empty_or_absent_chain_never_opens_the_export_gate() {
+        let mut shell = ShellModel::new();
+        assert!(!shell.export_gate_open(), "no recipe: nothing to export");
+        shell.recipe = Some(Recipe::new("a.mkv", rd_core::ExportPreset::Access));
+        assert!(
+            !shell.export_gate_open(),
+            "an empty chain is not an exportable chain"
+        );
+        shell.recipe = Some(
+            Recipe::new("a.mkv", rd_core::ExportPreset::Access)
+                .push(ModuleId::Finish.default_operation()),
+        );
+        assert!(shell.export_gate_open(), "a conservative chain needs no preview");
+    }
+
+    #[test]
+    fn stepping_tracks_the_playhead_before_anything_is_measured() {
+        let mut shell = ShellModel::new();
+        assert_eq!(shell.timeline.duration_secs, 0.0);
+        shell.step_frame(50);
+        assert_eq!(shell.viewer.current_frame, 50);
+        assert!((shell.timeline.playhead_secs - 2.0).abs() < 1e-9);
+        // Once a duration is known, the playhead clamps into it.
+        shell.timeline.duration_secs = 1.0;
+        shell.step_frame(50);
+        assert!((shell.timeline.playhead_secs - 1.0).abs() < 1e-9);
     }
 
     #[test]
