@@ -179,11 +179,13 @@ mod tests {
 
     #[test]
     fn round_trip_preserves_prefs() {
-        let mut prefs = WorkspacePrefs::default();
-        prefs.accent = Accent::Teal;
-        prefs.density = Density::Comfortable;
-        prefs.time_display = TimeDisplay::Frames;
-        prefs.safe_areas = true;
+        let prefs = WorkspacePrefs {
+            accent: Accent::Teal,
+            density: Density::Comfortable,
+            time_display: TimeDisplay::Frames,
+            safe_areas: true,
+            ..Default::default()
+        };
         let json = prefs.to_json().expect("serialize");
         assert_eq!(
             WorkspacePrefs::from_json(&json).expect("deserialize"),
