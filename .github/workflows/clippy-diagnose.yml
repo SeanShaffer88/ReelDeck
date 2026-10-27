@@ -1,0 +1,31 @@
+name: clippy-diagnose (temporary)
+
+# One-shot diagnostic: posts clippy output as a PR comment because the
+# sandbox cannot read Actions log storage. Removed after diagnosis.
+on:
+  push:
+    branches:
+      - "arena/12e0f24f-reeldeck"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Run clippy and capture output
+        shell: bash
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings > clippy.txt 2>&1 || true
+      - name: Post clippy output to PR #8
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment 8 --body-file clippy.txt
