@@ -13,6 +13,31 @@
 
   var state = M.initialState();
   var selectedStep = 0;
+  // Gesture id for the active continuous-control edit (a slider drag or
+  // a numeric field's focus session); null between gestures. All ticks in
+  // one gesture coalesce into a single undo entry in the model.
+  var paramGesture = null;
+
+  function isContinuousParam(el) {
+    if (!el || el.tagName !== "INPUT") return false;
+    return (el.dataset.control === "param" && el.type === "range") ||
+      el.dataset.control === "param-number";
+  }
+
+  function beginParamGesture(el) {
+    if (isContinuousParam(el) && paramGesture == null) {
+      paramGesture = M.beginGesture(state);
+    }
+  }
+
+  function endParamGesture() {
+    // Re-render once at gesture end: the drag path avoids rebuilding the
+    // control under the pointer, so the header's history states sync here.
+    if (paramGesture != null) {
+      paramGesture = null;
+      renderInspector();
+    }
+  }
   var palette = { items: [], index: 0, query: "" };
   var lastFocus = null;
   var jobSeq = 0;
@@ -1774,6 +1799,12 @@
     document.addEventListener("change", onChange);
     document.addEventListener("keydown", onKeyDown);
     document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("pointerup", endParamGesture);
+    document.addEventListener("pointercancel", endParamGesture);
+    document.addEventListener("focusin", function (e) { beginParamGesture(e.target); });
+    document.addEventListener("focusout", function (e) {
+      if (isContinuousParam(e.target)) endParamGesture();
+    });
     global.addEventListener("resize", debounce(function () { renderTimeline(); renderViewer(); }, 120));
 
     // Wipe drag
@@ -2019,7 +2050,7 @@
       var value = Number(el.value);
       var patch = {};
       patch[key] = value;
-      var r = M.updateParams(state, i, patch);
+      var r = M.updateParams(state, i, patch, paramGesture);
       if (!r.ok) return;
       var pct = ((value - Number(el.min)) / (Number(el.max) - Number(el.min))) * 100;
       el.style.setProperty("--fill", pct + "%");
@@ -2055,7 +2086,8 @@
     } else if (el.dataset.control === "param-number") {
       var patch2 = {};
       patch2[el.dataset.key] = Number(el.value);
-      var res = M.updateParams(state, Number(el.dataset.index), patch2);
+      // One focus session on the numeric field is one gesture.
+      var res = M.updateParams(state, Number(el.dataset.index), patch2, paramGesture);
       if (!res.ok) {
         el.setAttribute("aria-invalid", "true");
         toast("err", "Value refused", res.error);
@@ -2088,6 +2120,9 @@
   }
 
   function onPointerDown(e) {
+    // A press on a slider or numeric field opens a gesture; its ticks
+    // coalesce until the matching pointerup or focusout.
+    beginParamGesture(e.target);
     var ruler = e.target.closest("#ruler-track");
     if (ruler) {
       seekFromEvent(e, ruler);

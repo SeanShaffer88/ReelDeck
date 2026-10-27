@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   been previewed. The command table gains an Edit group (`Mod+Z`,
   `Mod+Shift+Z`), and the prototype renders disabled-until-available
   history buttons with accessible names and shortcut tooltips.
+- Continuous-gesture coalescing for undo history. `ShellModel::
+  begin_gesture` issues a `GestureId`; parameter replacements tagged
+  with the same id (one slider drag from press to release, or one
+  numeric-field focus session) collapse into a single undo entry whose
+  anchor is the pre-gesture recipe. Separate gestures stay separate even
+  on the same control, a refused tick preserves the gesture's anchor,
+  and a discrete edit between gestures breaks the chain. The prototype
+  opens a gesture on slider press or numeric-field focus and closes it
+  on release or blur, syncing the history controls at gesture end.
 - Interface model (`rd-ui`) and a framework-neutral shell prototype. The
   model turns the deferred-shell notes into working rules: the six
   workflow stages with evidence gates (each blocked stage names the missing

@@ -42,8 +42,10 @@
     return {
       selectedId: "04",
       chains: chains,
-      // Per-source chain history: { [clipId]: { undo: [], redo: [] } }.
-      // Undo never crosses from one source to another.
+      // Monotonic source of gesture ids for edit coalescing.
+      gestureSeq: 0,
+      // Per-source chain history: { [clipId]: { undo: [], redo: [] } },
+      // each entry { chain, gesture }. Undo never crosses sources.
       history: {},
       // Per-source evidence flags, swapped alongside the chain so a
       // preview or export stays attached to its own file.
@@ -149,12 +151,29 @@
     });
   }
 
-  /** Remember the chain before a successful edit; a new edit clears redo. */
-  function snapshot(state) {
+  /** Begin one continuous gesture (slider drag, numeric-field session).
+      Every edit tagged with the returned id collapses into one undo
+      entry, mirroring GestureId in crates/rd-ui/src/lib.rs. */
+  function beginGesture(state) {
+    state.gestureSeq = (state.gestureSeq || 0) + 1;
+    return state.gestureSeq;
+  }
+
+  /**
+   * Remember the chain before an edit. Returns false when the edit
+   * continues a gesture whose anchor entry is already stored, so a drag
+   * of fifty ticks still costs one undo. A fresh edit clears redo.
+   */
+  function snapshot(state, gesture) {
     var h = historyFor(state);
-    h.undo.push(cloneChain(state.chain));
+    var top = h.undo[h.undo.length - 1];
+    if (gesture != null && top && top.gesture === gesture) {
+      return false;
+    }
+    h.undo.push({ chain: cloneChain(state.chain), gesture: gesture == null ? null : gesture });
     if (h.undo.length > UNDO_LIMIT) h.undo.shift();
     h.redo = [];
+    return true;
   }
 
   function canUndo(state) {
@@ -169,8 +188,8 @@
   function undo(state) {
     var h = historyFor(state);
     if (!h.undo.length) return { ok: false };
-    h.redo.push(cloneChain(state.chain));
-    state.chain = h.undo.pop();
+    h.redo.push({ chain: cloneChain(state.chain), gesture: null });
+    state.chain = h.undo.pop().chain;
     state.chains[state.selectedId] = state.chain;
     // The restored chain has not itself been previewed in this state.
     state.previewed = false;
@@ -181,8 +200,8 @@
   function redo(state) {
     var h = historyFor(state);
     if (!h.redo.length) return { ok: false };
-    h.undo.push(cloneChain(state.chain));
-    state.chain = h.redo.pop();
+    h.undo.push({ chain: cloneChain(state.chain), gesture: null });
+    state.chain = h.redo.pop().chain;
     state.chains[state.selectedId] = state.chain;
     state.previewed = false;
     state.selectedStep = Math.max(0, Math.min(state.selectedStep || 0, state.chain.length - 1));
@@ -244,14 +263,18 @@
     return true;
   }
 
-  /** Validate and apply a parameter patch; refused values change nothing. */
-  function updateParams(state, index, patch) {
+  /**
+   * Validate and apply a parameter patch; refused values change nothing.
+   * An optional gesture id coalesces the edit into the gesture's single
+   * undo entry (slider drag, numeric-field focus session).
+   */
+  function updateParams(state, index, patch, gesture) {
     var step = state.chain[index];
     if (!step) return { ok: false, error: "Step " + (index + 1) + " no longer exists." };
     var next = Object.assign({}, step.params, patch);
     var error = validateParams(step.module, next);
     if (error) return { ok: false, error: error };
-    snapshot(state);
+    snapshot(state, gesture);
     step.params = next;
     state.previewed = false;
     return { ok: true };
@@ -594,6 +617,7 @@
     canRedo: canRedo,
     undo: undo,
     redo: redo,
+    beginGesture: beginGesture,
     filterFor: filterFor,
     chainFilter: chainFilter,
     summaryFor: summaryFor,

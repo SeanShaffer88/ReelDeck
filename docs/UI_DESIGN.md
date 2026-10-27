@@ -328,6 +328,15 @@ and covers every chain edit — add, remove, reorder, reset, and parameter
 changes — while refused edits record nothing. The history is bounded at
 100 entries per source, oldest first.
 
+**Continuous gestures coalesce.** A slider drag (pointer down to release)
+or a numeric field's focus session is one gesture: the model tags every
+intermediate value with a `GestureId` from `begin_gesture`, and only the
+recipe from before the gesture's first tick is stored, so fifty drag
+ticks cost one undo and one redo restores the final value. Two separate
+drags of the same control are separate gestures with separate entries.
+A refused tick never replaces the gesture's anchor, and an ordinary
+(discrete) edit between two gestures breaks the coalescing chain.
+
 States: empty (with add), uninspected source (with the reason and an
 inspect action), planner refusal (error text in the filter block), gate
 closed (`Preview required` + override), gate open.
@@ -417,9 +426,11 @@ feedback goes to toasts.
   (bounded at 100 entries). Every edit snapshots the recipe first, so an
   undo restores the exact operation including its parameters; refused
   edits and no-op reorders record nothing, and a new edit clears the redo
-  branch. Because an undo changes the chain, it also clears the preview
-  flag — a restored recipe has not itself been previewed, so the evidence
-  gate cannot be satisfied by a stale preview.
+  branch. Continuous-control gestures (a slider drag, a numeric field's
+  focus session) carry one `GestureId` and collapse into a single entry;
+  because an undo changes the chain, it also clears the preview flag — a
+  restored recipe has not itself been previewed, so the evidence gate
+  cannot be satisfied by a stale preview.
 - **Errors.** Three kinds, three treatments: **usage** (inline, next to
   the field), **blocked** (preflight row + disabled primary with reason),
   **failed run** (journal row + toast + proof noting the failure).
@@ -541,10 +552,10 @@ visual reference, not the shipping binary.
 
 | Check | Result | Where |
 | --- | --- | --- |
-| Model tests (stages, chain, guards, preflight, timeline, formatting, preferences, commands, per-source state, undo/redo) | **Pass** — 75 `rd-ui` tests, 157 across the workspace | CI, `crates/rd-ui/src/*` |
+| Model tests (stages, chain, guards, preflight, timeline, formatting, preferences, commands, per-source state, undo/redo, gesture coalescing) | **Pass** — 80 `rd-ui` tests, 162 across the workspace | CI, `crates/rd-ui/src/*` |
 | Format and lints (`cargo fmt --check`, clippy with `-D warnings`) | **Pass** | CI |
 | Release build (workspace) | **Pass** | CI |
-| Prototype structure and flow (boot, gating, chain edits, undo/redo, source switching, preview, export, verify, preferences) | Exercised headlessly (jsdom): no page errors; expected states reached, including per-source history and both redo chords | Authoring run (scripts not committed) |
+| Prototype structure and flow (boot, gating, chain edits, undo/redo, gesture coalescing, source switching, preview, export, verify, preferences) | Exercised headlessly (jsdom): no page errors; expected states reached, including per-source history, both redo chords, and a real slider focus→drag→blur gesture collapsing to one undo | Authoring run (scripts not committed) |
 | Accessibility (WCAG 2.1 A/AA) | **0 axe-core violations** on the shell, shortcuts, preferences and export panels, including the enabled and disabled history controls | Authoring run (axe-core 4.14, jsdom) |
 | Colour contrast | Reviewed against the token table; contrast targets stated in §3.1. Not machine-measured (no layout engine in the audit environment) | — |
 | Typography, spacing, layout at 1440/1280/1024/860 logical widths | Designed against §4.3; **not** confirmed by rendering on a display | — |
@@ -563,30 +574,32 @@ described as production-ready.
 ## 12. Next slices
 
 Done since the first version: per-source recipes and evidence in
-`ShellModel` (one `SourceState` per queue row, parallel to the queue), and
-a per-source undo/redo history over chain edits, mirrored by the
-prototype's history controls and chords.
+`ShellModel` (one `SourceState` per queue row, parallel to the queue); a
+per-source undo/redo history over chain edits, mirrored by the
+prototype's history controls and chords; and gesture coalescing, so a
+slider drag or numeric-field session collapses into one undo entry.
 
 1. **Real engine binding** — progress, cancellation and job journal from
    `rd-run`; the interface is drawn around those exact callbacks.
-2. **History coalescing for continuous controls** — undo currently records
-   one entry per discrete edit, so dragging a slider stores an entry per
-   input tick until the 100-entry cap drops the oldest. A gesture session
-   (drag start → release, or spinner focus → commit) should coalesce into
-   one entry, keyed by step and parameter, in both the model and the
-   prototype. Discrete edits already coalesce correctly.
-3. **Lossless segment export** — the preview range becomes a stream-copy
+2. **Lossless segment export** — the preview range becomes a stream-copy
    cut with its own proof; the trim model does not exist yet.
-4. **Batch queue** — per-file state transitions already gated; needs a
+3. **Batch queue** — per-file state transitions already gated; needs a
    queue runner and resume.
-5. **Proxies** — scrubbing long files at full resolution is the next
+4. **Proxies** — scrubbing long files at full resolution is the next
    performance cliff.
-6. **Framework spike** (§10) and a real-display visual pass.
+5. **Framework spike** (§10) and a real-display visual pass.
 
 ---
 
 ## Revision history
 
+- **2026-10-27 (third revision)** — continuous-gesture coalescing:
+  `ShellModel::begin_gesture` hands out `GestureId`s, and parameter
+  replacements tagged with the same id collapse into one undo entry,
+  including across a refused tick; discrete edits still record one entry
+  each. The prototype begins a gesture on slider press or numeric-field
+  focus and ends it on release/blur, re-rendering the history controls at
+  gesture end.
 - **2026-10-27 (second revision)** — per-source recipes and evidence:
   `ShellModel` holds one `SourceState` per queue row instead of a single
   chain, with per-source undo/redo (bounded at 100 edits) over all chain
