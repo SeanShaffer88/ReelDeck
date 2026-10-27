@@ -320,13 +320,23 @@ planner the executor uses), the planner's verdict (including refusals,
 verbatim), the preview gate, and the two ways forward: preview a segment,
 or record an expert override.
 
+The panel header carries **Undo** and **Redo** icon buttons beside the
+add-module action. They are disabled (never hidden) when there is nothing
+to undo or redo, so the control's state is always scannable; each carries
+an accessible name and its chord in the tooltip. History is per source
+and covers every chain edit — add, remove, reorder, reset, and parameter
+changes — while refused edits record nothing. The history is bounded at
+100 entries per source, oldest first.
+
 States: empty (with add), uninspected source (with the reason and an
 inspect action), planner refusal (error text in the filter block), gate
 closed (`Preview required` + override), gate open.
 
 Keyboard: `A` add, `Alt+↑/↓` reorder, `Delete` remove, `Alt+Backspace`
-reset, `Enter` expand/collapse. Refused values show the range and leave
-the chain untouched.
+reset, `Enter` expand/collapse, `Mod+Z` undo, `Mod+Shift+Z` redo
+(`Ctrl+Y` is accepted as an alternate redo chord at the binding edge).
+Refused values show the range and leave the chain and the history
+untouched.
 
 ### 5.6 Controls
 
@@ -391,8 +401,10 @@ feedback goes to toasts.
 - **Selection vs focus.** Only one source, one step and one tab are
   selected at a time; focus is independent and always visible.
 - **Order of operations.** Choosing a source updates viewer, timeline,
-  chain, export and proof together. Chains belong to their source; a chain
-  never describes a different file's picture.
+  chain, export and proof together. Chains belong to their source, and so
+  do their preview evidence, expert override, export result, and undo
+  history; a chain never describes a different file's picture, and an
+  undo in one file never rewinds another.
 - **Gate feedback.** Attempting a blocked stage is not a dead click: a
   toast and a live-region sentence name the missing evidence and the fix.
 - **Irreversible actions.** Exports confirm with facts; deletes are
@@ -401,9 +413,13 @@ feedback goes to toasts.
 - **Progress honesty.** A job shows `measuring…` until the engine reports
   a rate, then a percentage; cancel stops the run and removes the partial
   output, and the log records the cancellation.
-- **Undo.** Removal returns the exact operation including its parameters;
-  refused parameter edits never mutate the chain. A full undo stack is a
-  model slice, not yet present.
+- **Undo.** The model keeps a per-source undo/redo history of chain edits
+  (bounded at 100 entries). Every edit snapshots the recipe first, so an
+  undo restores the exact operation including its parameters; refused
+  edits and no-op reorders record nothing, and a new edit clears the redo
+  branch. Because an undo changes the chain, it also clears the preview
+  flag — a restored recipe has not itself been previewed, so the evidence
+  gate cannot be satisfied by a stale preview.
 - **Errors.** Three kinds, three treatments: **usage** (inline, next to
   the field), **blocked** (preflight row + disabled primary with reason),
   **failed run** (journal row + toast + proof noting the failure).
@@ -483,8 +499,10 @@ labelled as simulated; nothing claims to have rendered a file.
 The prototype exists for three reasons: to settle the interface before the
 framework choice, to exercise the model's rules against a real surface, and
 to give reviewers something to click. It intentionally mirrors
-`crates/rd-ui/src` function-for-function where it can, and the places it
-goes further (per-source chains, timeline drawing) are listed in §12.
+`crates/rd-ui/src` function-for-function where it can. Per-source chains,
+per-source evidence, undo/redo and the command table now exist in both
+places; the remaining surface-only behaviour (timeline drawing, the
+simulated jobs) is listed in §12.
 
 ---
 
@@ -523,11 +541,11 @@ visual reference, not the shipping binary.
 
 | Check | Result | Where |
 | --- | --- | --- |
-| Model tests (stages, chain, guards, preflight, timeline, formatting, preferences, commands) | **Pass** — 67 `rd-ui` tests, 129 across the workspace | CI, `crates/rd-ui/src/*` |
+| Model tests (stages, chain, guards, preflight, timeline, formatting, preferences, commands, per-source state, undo/redo) | **Pass** — 75 `rd-ui` tests, 157 across the workspace | CI, `crates/rd-ui/src/*` |
 | Format and lints (`cargo fmt --check`, clippy with `-D warnings`) | **Pass** | CI |
 | Release build (workspace) | **Pass** | CI |
-| Prototype structure and flow (boot, gating, chain edits, preview, export, verify, preferences) | Exercised headlessly (jsdom): no page errors; expected states reached | Authoring run (scripts not committed) |
-| Accessibility (WCAG 2.1 A/AA) | **0 axe-core violations** on the shell, shortcuts, preferences and export panels | Authoring run (axe-core 4.14, jsdom) |
+| Prototype structure and flow (boot, gating, chain edits, undo/redo, source switching, preview, export, verify, preferences) | Exercised headlessly (jsdom): no page errors; expected states reached, including per-source history and both redo chords | Authoring run (scripts not committed) |
+| Accessibility (WCAG 2.1 A/AA) | **0 axe-core violations** on the shell, shortcuts, preferences and export panels, including the enabled and disabled history controls | Authoring run (axe-core 4.14, jsdom) |
 | Colour contrast | Reviewed against the token table; contrast targets stated in §3.1. Not machine-measured (no layout engine in the audit environment) | — |
 | Typography, spacing, layout at 1440/1280/1024/860 logical widths | Designed against §4.3; **not** confirmed by rendering on a display | — |
 | Pixel rendering on a real display or GPU | **Not verified** — no usable browser in the authoring environment | — |
@@ -544,23 +562,36 @@ described as production-ready.
 
 ## 12. Next slices
 
-1. **Per-source recipes in the model** — the prototype already swaps chains
-   per source; `ShellModel` still holds one.
-2. **Undo/redo stack** over chain edits (removal already returns the
-   operation).
-3. **Real engine binding** — progress, cancellation and job journal from
+Done since the first version: per-source recipes and evidence in
+`ShellModel` (one `SourceState` per queue row, parallel to the queue), and
+a per-source undo/redo history over chain edits, mirrored by the
+prototype's history controls and chords.
+
+1. **Real engine binding** — progress, cancellation and job journal from
    `rd-run`; the interface is drawn around those exact callbacks.
-4. **Lossless segment export** — the preview range becomes a stream-copy
+2. **History coalescing for continuous controls** — undo currently records
+   one entry per discrete edit, so dragging a slider stores an entry per
+   input tick until the 100-entry cap drops the oldest. A gesture session
+   (drag start → release, or spinner focus → commit) should coalesce into
+   one entry, keyed by step and parameter, in both the model and the
+   prototype. Discrete edits already coalesce correctly.
+3. **Lossless segment export** — the preview range becomes a stream-copy
    cut with its own proof; the trim model does not exist yet.
-5. **Batch queue** — per-file state transitions already gated; needs a
+4. **Batch queue** — per-file state transitions already gated; needs a
    queue runner and resume.
-6. **Proxies** — scrubbing long files at full resolution is the next
+5. **Proxies** — scrubbing long files at full resolution is the next
    performance cliff.
-7. **Framework spike** (§10) and a real-display visual pass.
+6. **Framework spike** (§10) and a real-display visual pass.
 
 ---
 
 ## Revision history
 
+- **2026-10-27 (second revision)** — per-source recipes and evidence:
+  `ShellModel` holds one `SourceState` per queue row instead of a single
+  chain, with per-source undo/redo (bounded at 100 edits) over all chain
+  edits; the prototype gains history buttons, `Mod+Z` / `Mod+Shift+Z`
+  (`Ctrl+Y` alternate), and an Edit command group. A sample clip missing
+  its inspection frame count, which crashed source switching, is fixed.
 - **2026-10-27** — first version, with the model and prototype. Records
   the framework decision as open and the verification gaps as gaps.

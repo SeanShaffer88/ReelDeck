@@ -144,6 +144,23 @@ pub const COMMANDS: &[CommandSpec] = &[
         "settings options theme density",
         "",
     ),
+    // Edit
+    cmd(
+        "edit.undo",
+        "Undo chain edit",
+        "Mod+Z",
+        "Edit",
+        "revert back history",
+        "Reverts the last chain edit on the selected source; each source keeps its own history.",
+    ),
+    cmd(
+        "edit.redo",
+        "Redo chain edit",
+        "Mod+Shift+Z",
+        "Edit",
+        "repeat forward history",
+        "Re-applies an undone chain edit on the selected source.",
+    ),
     // Viewer
     cmd(
         "viewer.program",
