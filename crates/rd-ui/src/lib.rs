@@ -1041,16 +1041,24 @@ mod tests {
 
     #[test]
     fn older_shell_state_without_sources_still_deserializes() {
-        // A shell saved before per-source state existed has no `sources`
-        // field; serde defaults fill an empty store rather than failing.
+        // A shell saved before per-source state existed has the old shape:
+        // a single `recipe` plus flat evidence flags, and no `sources`
+        // field. Unknown fields are ignored; serde defaults fill the new
+        // store as empty rather than failing.
         let json = concat!(
             r#"{"queue":[{"name":"old.mkv","fixity":"pending","inspect":"not_inspected"}],"#,
-            r#""selected":null}"#
+            r#""selected":null,"viewer":{"current_frame":0,"mode":"program","#,
+            r#""showing_before":false,"compare":false,"zoom_100":false},"jobs":[],"#,
+            r#""recipe":null,"previewed":false,"expert_override":false,"#,
+            r#""exported_output":null}"#
         );
         let back: ShellModel = serde_json::from_str(json).expect("legacy state deserializes");
         assert_eq!(back.queue.len(), 1);
         assert!(back.sources.is_empty());
         assert!(back.recipe().is_none());
+        // Old-shape fields that moved into SourceState have no values to
+        // migrate, so evidence starts clean rather than invented.
+        assert!(!back.can_undo());
     }
 
     fn denoise(temporal: f32) -> Operation {
