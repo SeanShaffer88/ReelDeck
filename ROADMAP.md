@@ -25,7 +25,14 @@ done when its criteria pass, not when its code merely compiles.
 - [x] Segment preview (operator-chosen segment) via
   `reeldeck preview` (before/after compare lands with the GUI shell)
 - [x] Preservation (FFV1/Matroska) + Mezzanine + Access exports
-- [ ] GUI shell: queue, viewer, timeline graphs, frame-step to anomaly
+- [x] Interface model: workflow stages with evidence gates, chain editing
+  and the canonical module catalog, the preview gate, timeline lanes and
+  marks, preferences, the command table, and pre-export checks
+- [x] Framework-neutral prototype of the shell (design reference, not the
+  shipping binary) — see [Interface Design](docs/UI_DESIGN.md)
+- [ ] Shipping shell: framework decision, then binding the real engine
+  (measured progress, cancellation) to the layout the prototype proves
+- [ ] Per-source recipes in the shell model; per-file undo/redo
 
 ## v0.3 — The difficult-footage release
 
@@ -36,6 +43,17 @@ done when its criteria pass, not when its code merely compiles.
   `reeldeck verify`)
 - [ ] Batch queue
 - VapourSynth/QTGMC as the optional archival tier
+
+## v0.4 — Cutting and throughput
+
+- Lossless, keyframe-snapped segment export (stream copy) with its own
+  proof, kept distinct from a re-encode
+- Batch queue: per-file state, resume at the failed file, copy settings
+- Proxy media for scrubbing long captures
+- Chapter and attachment preservation for Matroska masters
+- Scene-change detection as timeline markers
+- Quality-control overlays for review copies (never in a preservation
+  master)
 
 ## Later / maybe never
 

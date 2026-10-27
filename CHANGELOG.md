@@ -9,10 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `rd-ui` now depends on `rd-analyze` and `rd-pipeline` (workspace-internal
+  crates, no new external dependency). Justification: the interface must
+  show the planner's exact filter string and the analysis model's real
+  measurements rather than re-deriving either, so the panel cannot disagree
+  with what the executor will run.
 - License: GPL-2.0-only → MIT (maintainer decision, 2026-10-20).
 
 ### Added
 
+- Interface model (`rd-ui`) and a framework-neutral shell prototype. The
+  model turns the deferred-shell notes into working rules: the six
+  workflow stages with evidence gates (each blocked stage names the missing
+  evidence and the fix), chain editing over the canonical module catalog
+  (blurbs, damage notes, relative costs, conservative defaults, canonical
+  insertion order, refused parameters that leave the chain untouched), the
+  preview gate for aggressive settings, the exact filter string taken from
+  `rd-pipeline` rather than rebuilt, timeline measurement lanes with
+  peak-preserving downsampling, anomaly marks and a "worst moments"
+  preview-range suggestion, display formatting (non-drop timecode, binary
+  units, honest `—` for unknowns), workspace preferences, one command table
+  driving bindings/palette/help, and the pre-export checks (chain, preview,
+  destination, fixity, disk space) with `UNMEASURED` as a real outcome.
+  Alongside the model, `crates/rd-ui/prototype` renders the interface as
+  dependency-free HTML/CSS/JS for design review: a dense four-region shell,
+  viewer with scopes, field split and a before/after wipe, measurement
+  lanes, chain inspector with live filter strings, export preflight, proof
+  panel, command palette, preferences dialog and full keyboard operation.
+  Sample data and simulated jobs are labelled as such in the interface.
+- Interface documentation: [docs/UI_DESIGN.md](docs/UI_DESIGN.md) (layout,
+  tokens, components, states, accessibility, verification record, and the
+  still-open shipping-framework decision) and an internal capability scan
+  under `docs/research/` that records which conventions were adopted,
+  queued or rejected, and why.
 - Closing the Prove loop: export verification in `rd-core`
   (`verify_export` — the recorded run, the output hash, the source
   hash, the preset, and the schema version, each checked separately

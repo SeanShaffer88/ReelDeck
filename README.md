@@ -9,9 +9,11 @@ evidence, exactly what was done to it.
 
 > **Status: v0.2 in progress.** This repository holds the workspace, the
 > recipe/export-log data model, frame-analysis parsing and reporting,
-> pipeline planning, render execution with proof sidecars, and a small
-> CLI. The GUI shell has not landed yet. Follow the
-> [roadmap](ROADMAP.md) as it becomes real, slice by slice.
+> pipeline planning, render execution with proof sidecars, a small CLI —
+> and now the **interface model plus an interactive prototype of the
+> shell**. The shipping GUI is not bound to a framework yet; the
+> [interface design](docs/UI_DESIGN.md) records that decision honestly.
+> Follow the [roadmap](ROADMAP.md) as it becomes real, slice by slice.
 
 ## Why not a black box?
 
@@ -42,6 +44,27 @@ not contain any operation that does.
    *Access* (viewing/sharing).
 6. **Prove** — every export ships with its recipe and export log beside it.
 
+## The interface
+
+The shell is built around the work, not around a single button: a source
+queue on the left, the picture and its measurements in the centre, the
+restoration chain on the right, jobs along the bottom, and the proof beside
+the export. It is dense, dark and keyboard-first, with one restrained
+accent, written state everywhere, and consequences printed next to the
+controls that cause them.
+
+- **[Interface design](docs/UI_DESIGN.md)** — layout, tokens, components,
+  states, interaction rules, accessibility, and the open framework
+  decision.
+- **[Prototype](crates/rd-ui/prototype/index.html)** — the interface as
+  dependency-free HTML/CSS/JS: open the file, no build step and no network.
+  Sample project data and simulated jobs are labelled as such.
+- **`rd-ui`** — the same rules as testable model code: stage gates, chain
+  editing, the preview gate, timeline lanes and marks, preferences, the
+  command table, and the pre-export checks. Its filter string comes from
+  the same planner the executor runs, so what the panel shows is what would
+  be executed.
+
 ## Engine
 
 ReelDeck builds on FFmpeg's documented filters (bwdif/yadif deinterlacing,
@@ -62,7 +85,7 @@ leaves the disk.
 | `crates/rd-analyze` | ffprobe / signalstats / detect-filter / idet parsing into a typed inspection model, plus the sampled-range `analyze` pass that runs the tools. |
 | `crates/rd-pipeline` | Planning: recipe → filter strings, two-pass stabilization plan, export argument vectors. Plans only; never executes. |
 | `crates/rd-run` | Execution: runs plans with FFmpeg (fixity gate, never-overwrite, measured progress, cancellation) and writes the recipe + export-log proof beside every output. |
-| `crates/rd-ui` | GUI state model (queue/viewer/chain/jobs). Framework decision deferred — see the plan. |
+| `crates/rd-ui` | Interface state model and design system: workflow stages and gates, chain editing and guards, timeline lanes/marks, formatting, preferences, commands, pre-export checks — plus a framework-neutral shell prototype. |
 | `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `hash`, `version`. |
 
 ## Building from source
@@ -173,6 +196,8 @@ cargo build --workspace --release
 
 - [Architecture & UX Plan](docs/ARCHITECTURE_AND_UX_PLAN.md) — the design
   contract. Read this before writing code.
+- [Interface Design](docs/UI_DESIGN.md) — the shell: layout, visual
+  language, components, interaction, accessibility, and what is verified.
 - [Roadmap](ROADMAP.md)
 - [Changelog](CHANGELOG.md)
 
