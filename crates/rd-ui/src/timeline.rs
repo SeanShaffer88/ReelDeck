@@ -636,7 +636,10 @@ mod tests {
     fn an_unmeasured_strip_still_tracks_the_playhead() {
         let mut t = TimelineModel::new(0.0, PAL);
         t.track_playhead(3.5);
-        assert_eq!(t.playhead_secs, 3.5, "no measured span: nothing to clamp to");
+        assert_eq!(
+            t.playhead_secs, 3.5,
+            "no measured span: nothing to clamp to"
+        );
         t.track_playhead(-2.0);
         assert_eq!(t.playhead_secs, 0.0);
         t.track_playhead(f64::NAN);

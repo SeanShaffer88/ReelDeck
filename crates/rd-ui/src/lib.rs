@@ -803,7 +803,10 @@ mod tests {
             Recipe::new("a.mkv", rd_core::ExportPreset::Access)
                 .push(ModuleId::Finish.default_operation()),
         );
-        assert!(shell.export_gate_open(), "a conservative chain needs no preview");
+        assert!(
+            shell.export_gate_open(),
+            "a conservative chain needs no preview"
+        );
     }
 
     #[test]
