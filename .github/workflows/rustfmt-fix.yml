@@ -1,10 +1,13 @@
 name: rustfmt-fix (temporary)
 
 # One-shot helper: applies the repository's canonical rustfmt output and
-# pushes it back to the current branch. This file is removed in the same
-# change set once formatting is in place.
+# pushes it back to the current branch. This file is removed in a later
+# commit once formatting is in place. Push triggers (unlike
+# workflow_dispatch) evaluate the workflow version on the pushed branch.
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - "arena/9f2efe01-reeldeck"
 
 permissions:
   contents: write
