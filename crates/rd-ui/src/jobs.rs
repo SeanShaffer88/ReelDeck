@@ -470,7 +470,6 @@ mod tests {
             }
             other => panic!("expected running, got {other:?}"),
         }
-        drop(record);
         journal.succeed(id, &report()).expect("succeeds");
         let outcome = match &journal.get(id).unwrap().status {
             JobStatus::Succeeded(outcome) => outcome.clone(),
