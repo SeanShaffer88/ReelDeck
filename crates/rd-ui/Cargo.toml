@@ -5,10 +5,12 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "ReelDeck user-interface state model. No GUI framework yet; the framework decision is deferred (see docs/ARCHITECTURE_AND_UX_PLAN.md)."
+description = "ReelDeck user-interface state model and the framework-neutral shell prototype. No GUI framework bound yet; the shipping-shell decision is recorded in docs/UI_DESIGN.md."
 
 [dependencies]
 rd-core = { path = "../rd-core", version = "0.1.0" }
+rd-analyze = { path = "../rd-analyze", version = "0.1.0" }
+rd-pipeline = { path = "../rd-pipeline", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
