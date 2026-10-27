@@ -31,7 +31,7 @@ pub const JOB_HISTORY_LIMIT: usize = 100;
 /// Stable identifier for one job within a session's journal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct JobId(u64);
+pub struct JobId(pub(crate) u64);
 
 impl JobId {
     /// The numeric value, for keys and display.
@@ -98,9 +98,9 @@ impl JobProgress {
     /// from the planned total. An unknown or zero total yields `None`
     /// rather than a fabricated number.
     fn from_measured(progress: &Progress, total_frames: Option<u64>) -> Self {
-        let percent = total_frames.filter(|t| *t > 0).map(|total| {
-            ((progress.frame.saturating_mul(100)) / total).min(100) as u8
-        });
+        let percent = total_frames
+            .filter(|t| *t > 0)
+            .map(|total| ((progress.frame.saturating_mul(100)) / total).min(100) as u8);
         JobProgress {
             frames_processed: progress.frame,
             out_time_us: progress.out_time_us,
@@ -274,17 +274,17 @@ impl JobJournal {
     /// job is never evicted; if every entry is active the oldest goes.
     fn enforce_cap(&mut self) {
         while self.jobs.len() > JOB_HISTORY_LIMIT {
-            let terminal = self
-                .jobs
-                .iter()
-                .position(|job| !job.status.is_active());
+            let terminal = self.jobs.iter().position(|job| !job.status.is_active());
             let index = terminal.unwrap_or(0);
             self.jobs.remove(index);
         }
     }
 
     fn index_of(&self, id: JobId) -> Result<usize, JobError> {
-        self.jobs.iter().position(|job| job.id == id).ok_or(JobError::UnknownJob(id))
+        self.jobs
+            .iter()
+            .position(|job| job.id == id)
+            .ok_or(JobError::UnknownJob(id))
     }
 
     /// A worker took the job: `Queued → Running`.
@@ -303,11 +303,7 @@ impl JobJournal {
 
     /// Apply one measured engine block. Allowed while running or
     /// cancelling, since the renderer keeps reporting as it drains.
-    pub fn apply_progress(
-        &mut self,
-        id: JobId,
-        progress: &Progress,
-    ) -> Result<(), JobError> {
+    pub fn apply_progress(&mut self, id: JobId, progress: &Progress) -> Result<(), JobError> {
         let index = self.index_of(id)?;
         let total = self.jobs[index].total_frames;
         let next = JobProgress::from_measured(progress, total);
@@ -410,7 +406,10 @@ impl JobJournal {
 
     /// Records that have not reached a terminal state.
     pub fn active(&self) -> Vec<&JobRecord> {
-        self.jobs.iter().filter(|job| job.status.is_active()).collect()
+        self.jobs
+            .iter()
+            .filter(|job| job.status.is_active())
+            .collect()
     }
 
     /// Bottom-panel projections for every record, oldest first.
@@ -463,7 +462,7 @@ mod tests {
             .apply_progress(id, &measured(25))
             .expect("progress accepted");
         let record = journal.get(id).unwrap();
-        match record.status {
+        match &record.status {
             JobStatus::Running(progress) => {
                 assert_eq!(progress.frames_processed, 25);
                 assert_eq!(progress.percent, Some(25));
@@ -471,6 +470,7 @@ mod tests {
             }
             other => panic!("expected running, got {other:?}"),
         }
+        drop(record);
         journal.succeed(id, &report()).expect("succeeds");
         let outcome = match &journal.get(id).unwrap().status {
             JobStatus::Succeeded(outcome) => outcome.clone(),
@@ -479,6 +479,7 @@ mod tests {
         assert_eq!(outcome.frames_processed, 100);
         assert!(outcome.recipe_sidecar.ends_with(".recipe.json"));
         assert_eq!(outcome.warnings, vec!["one dropped frame".to_string()]);
+        let record = journal.get(id).unwrap();
         assert_eq!(record.summary().percent, Some(100));
         assert!(!record.summary().cancellable);
     }

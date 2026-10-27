@@ -795,11 +795,7 @@ impl ShellModel {
     /// Close a successful run and write its evidence back to the job's
     /// source: a preview satisfies the preview gate, and an export names
     /// the output the Prove stage reads.
-    pub fn job_succeeded(
-        &mut self,
-        id: JobId,
-        report: &rd_run::RunReport,
-    ) -> Result<(), JobError> {
+    pub fn job_succeeded(&mut self, id: JobId, report: &rd_run::RunReport) -> Result<(), JobError> {
         let record = self.journal.get(id).cloned();
         self.journal.succeed(id, report)?;
         if let Some(record) = record {
@@ -808,8 +804,7 @@ impl ShellModel {
                     match record.kind {
                         JobKind::Preview => source.previewed = true,
                         JobKind::Export => {
-                            source.exported_output =
-                                Some(report.output.display().to_string())
+                            source.exported_output = Some(report.output.display().to_string())
                         }
                         JobKind::Verify | JobKind::Rerun | JobKind::Fixity | JobKind::Inspect => {}
                     }
@@ -1628,9 +1623,14 @@ mod tests {
             )
             .expect("progress");
         assert_eq!(shell.job_summaries()[0].percent, Some(40));
-        shell.job_succeeded(id, &run_report("preview.mkv")).expect("done");
+        shell
+            .job_succeeded(id, &run_report("preview.mkv"))
+            .expect("done");
 
-        assert!(shell.sources[0].previewed, "the preview evidence is recorded");
+        assert!(
+            shell.sources[0].previewed,
+            "the preview evidence is recorded"
+        );
         assert!(shell.stage_access(Stage::Export).available);
         assert_eq!(shell.journal.records()[0].status.word(), "Done");
     }
@@ -1651,7 +1651,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(shell.job_summaries()[0].percent, None);
-        shell.job_succeeded(id, &run_report("capture.restored.mkv")).unwrap();
+        shell
+            .job_succeeded(id, &run_report("capture.restored.mkv"))
+            .unwrap();
 
         assert_eq!(
             shell.sources[0].exported_output.as_deref(),
@@ -1665,7 +1667,9 @@ mod tests {
         let mut shell = chain_model();
         let failed = shell.enqueue_job("Export", JobKind::Export, Some(10));
         shell.start_job(failed).unwrap();
-        shell.job_failed(failed, "render failed: exit status 1").unwrap();
+        shell
+            .job_failed(failed, "render failed: exit status 1")
+            .unwrap();
         assert!(shell.sources[0].exported_output.is_none());
         assert!(!shell.sources[0].previewed);
 
@@ -1677,7 +1681,10 @@ mod tests {
             JobStatus::Cancelling(_)
         ));
         shell.job_confirmed_cancelled(cancelled).unwrap();
-        assert!(!shell.sources[0].previewed, "a cancelled preview proves nothing");
+        assert!(
+            !shell.sources[0].previewed,
+            "a cancelled preview proves nothing"
+        );
         assert_eq!(shell.journal.records().len(), 2);
         // The cancel flag is the engine's; the model only records intent.
         assert!(shell.job_summaries().iter().all(|row| !row.cancellable));
@@ -1688,7 +1695,9 @@ mod tests {
         let mut shell = ShellModel::new();
         let unknown = JobId(42);
         assert!(shell.start_job(unknown).is_err());
-        assert!(shell.apply_job_progress(unknown, &rd_run::Progress::default()).is_err());
+        assert!(shell
+            .apply_job_progress(unknown, &rd_run::Progress::default())
+            .is_err());
         assert!(shell.request_job_cancel(unknown).is_err());
 
         shell.add_to_queue("a.mkv");
