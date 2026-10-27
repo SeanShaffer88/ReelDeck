@@ -1492,7 +1492,7 @@ mod tests {
             .chain_replace_gestured(0, denoise(12.0), gesture)
             .expect("tick");
         let json = serde_json::to_string(&shell).expect("serialize");
-        let back: ShellModel = serde_json::from_str(&json).expect("deserialize");
+        let mut back: ShellModel = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(
             back.sources[0].undo_depth(),
             1,
