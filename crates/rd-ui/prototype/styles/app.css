@@ -2057,3 +2057,35 @@ input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-of
 @media (max-width: 1080px) {
   #btn-inspector-toggle { display: inline-flex; }
 }
+
+/* Queue rows carry a real button for keyboard and assistive technology. */
+button.clip-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: 0;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  min-width: 0;
+}
+button.clip-name:hover b { color: var(--accent); }
+button.clip-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+/* The ruler is a position control: give it a focus ring like one. */
+.ruler-track:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Toasts fade rather than vanish. */
+.toast { transition: opacity var(--dur-2) var(--ease), transform var(--dur-2) var(--ease); }
+
+/* Drawer affordances only exist in the layouts that have drawers. */
+#btn-queue-toggle { display: none; }
+@media (max-width: 860px) {
+  #btn-queue-toggle { display: inline-flex; }
+}

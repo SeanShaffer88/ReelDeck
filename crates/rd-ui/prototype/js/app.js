@@ -127,8 +127,10 @@
       var selected = c.id === state.selectedId;
       return '<tr data-action="select-clip" data-id="' + c.id + '" data-selected="' + selected + '"' +
         ' aria-selected="' + selected + '" tabindex="' + (selected ? "0" : "-1") + '">' +
-        '<td><span class="clip-name"><img class="queue-thumb" alt="" src="assets/media/frame-ashland.jpg">' +
-        '<span class="clip-label"><b class="truncate">' + U.esc(c.name) + "</b><span>" + U.esc(c.sub) + "</span></span></span></td>" +
+        '<td><button class="clip-name" data-action="select-clip" data-id="' + c.id + '"' +
+        ' aria-label="Select ' + U.esc(c.name) + ', ' + U.esc(c.sub) + '">' +
+        '<img class="queue-thumb" alt="" src="assets/media/frame-ashland.jpg">' +
+        '<span class="clip-label"><b class="truncate">' + U.esc(c.name) + "</b><span>" + U.esc(c.sub) + "</span></span></button></td>" +
         '<td><span class="row tight">' + fix + insp + "</span></td>" +
         '<td class="num mono-num faint">' + f.duration(c.duration) + "</td></tr>";
     }).join("");
@@ -260,6 +262,11 @@
     $("tc-current").textContent = f.timecode(Math.round(state.viewer.playhead * f.fps(clip.rate)), clip.rate);
     $("tc-total").textContent = f.timecode(Math.round(clip.duration * f.fps(clip.rate)), clip.rate);
     $("hud-time").textContent = f.timecodeAt(state.viewer.playhead, clip.rate);
+    var ruler = $("ruler-track");
+    if (ruler) {
+      ruler.setAttribute("aria-valuenow", String(Math.round(state.viewer.playhead)));
+      ruler.setAttribute("aria-valuetext", f.timecodeAt(state.viewer.playhead, clip.rate));
+    }
     var rangeEl = $("tc-range");
     if (state.range) {
       rangeEl.textContent = f.durationShort(state.range.in) + " → " + f.durationShort(state.range.out) +
@@ -282,7 +289,10 @@
     var ticks = U.rulerTicks(clip.duration, clip.rate, width);
 
     r.innerHTML = '<div class="ruler-spacer">' + f.duration(clip.duration) + "</div>" +
-      '<div class="ruler-track" id="ruler-track">' +
+      '<div class="ruler-track" id="ruler-track" role="slider" tabindex="0"' +
+      ' aria-label="Timeline position" aria-valuemin="0" aria-valuemax="' + Math.round(clip.duration) + '"' +
+      ' aria-valuenow="' + Math.round(state.viewer.playhead) + '"' +
+      ' aria-valuetext="' + f.timecodeAt(state.viewer.playhead, clip.rate) + '">' +
       ticks.ticks.map(function (t) {
         var pct = (t.secs / clip.duration) * 100;
         return '<span class="ruler-tick' + (t.major ? "" : " minor") + '" style="left:' + pct + '%">' +
@@ -2072,6 +2082,13 @@
     var typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
     if (e.key === "Escape") {
       if (document.querySelector(".scrim:not([hidden])")) { closeAllDialogs(); return; }
+      if (document.body.dataset.inspectorOpen === "true" || document.body.dataset.queueOpen === "true") {
+        document.body.dataset.inspectorOpen = "false";
+        document.body.dataset.queueOpen = "false";
+        $("btn-inspector-toggle").setAttribute("aria-expanded", "false");
+        $("btn-queue-toggle").setAttribute("aria-expanded", "false");
+        return;
+      }
       if (typing) { e.target.blur(); return; }
       state.range = null;
       updateSelectionBand();
