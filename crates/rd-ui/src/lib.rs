@@ -816,7 +816,10 @@ mod tests {
 
         shell.sources[0].previewed = true;
         assert!(shell.chain_move(1, true));
-        assert!(!shell.sources[0].previewed, "a reorder invalidates the preview");
+        assert!(
+            !shell.sources[0].previewed,
+            "a reorder invalidates the preview"
+        );
         assert_eq!(shell.chain_lines()[0].module, ModuleId::Denoise);
 
         let removed = shell.chain_remove(0).expect("remove");
@@ -1067,7 +1070,10 @@ mod tests {
         shell.sources[0].exported_output = Some("a.restored.mkv".to_string());
 
         shell.select(1);
-        assert!(shell.recipe().is_none(), "the second source has no chain yet");
+        assert!(
+            shell.recipe().is_none(),
+            "the second source has no chain yet"
+        );
         assert!(!shell.export_gate_open());
         shell.load_recipe(
             Recipe::new("b.mkv", ExportPreset::Access).push(ModuleId::Finish.default_operation()),
@@ -1078,9 +1084,15 @@ mod tests {
         // untouched: the two records never share state.
         shell.select(0);
         assert_eq!(shell.chain_summary().len(), 1);
-        assert_eq!(ModuleId::of(&shell.recipe().unwrap().operations[0]), ModuleId::Deinterlace);
+        assert_eq!(
+            ModuleId::of(&shell.recipe().unwrap().operations[0]),
+            ModuleId::Deinterlace
+        );
         assert!(shell.sources[0].previewed);
-        assert_eq!(shell.sources[0].exported_output.as_deref(), Some("a.restored.mkv"));
+        assert_eq!(
+            shell.sources[0].exported_output.as_deref(),
+            Some("a.restored.mkv")
+        );
         assert!(shell.export_gate_open());
 
         shell.select(1);
@@ -1133,8 +1145,14 @@ mod tests {
         shell.chain_add(ModuleId::Finish).expect("add");
         assert!(shell.can_undo());
         shell.select(0);
-        assert!(!shell.can_redo(), "source a's redo was not consumed by source b");
-        assert!(shell.can_undo(), "source a's history is untouched by source b");
+        assert!(
+            !shell.can_redo(),
+            "source a's redo was not consumed by source b"
+        );
+        assert!(
+            shell.can_undo(),
+            "source a's history is untouched by source b"
+        );
     }
 
     #[test]
@@ -1184,7 +1202,10 @@ mod tests {
         let mut shell = chain_model();
         shell.sources[0].previewed = true;
         shell.chain_add(ModuleId::Denoise).expect("add");
-        assert!(!shell.sources[0].previewed, "any edit invalidates the preview");
+        assert!(
+            !shell.sources[0].previewed,
+            "any edit invalidates the preview"
+        );
         shell.sources[0].previewed = true;
         assert!(shell.undo());
         assert!(
