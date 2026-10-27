@@ -602,9 +602,7 @@ impl ShellModel {
         op: Operation,
         gesture: GestureId,
     ) -> Result<(), ChainEditError> {
-        self.edit_recipe(Some(gesture), |recipe| {
-            replace_step(recipe, index, op)
-        })
+        self.edit_recipe(Some(gesture), |recipe| replace_step(recipe, index, op))
     }
 
     /// Restore one step to its module defaults.
@@ -1348,12 +1346,15 @@ mod tests {
         let mut shell = ShellModel::new();
         shell.add_to_queue("a.mkv");
         shell.load_recipe(
-            Recipe::new("a.mkv", ExportPreset::Access)
-                .push(ModuleId::Denoise.default_operation()),
+            Recipe::new("a.mkv", ExportPreset::Access).push(ModuleId::Denoise.default_operation()),
         );
         let anchor = shell.recipe().cloned().expect("recipe");
         let gesture = shell.begin_gesture();
-        assert_ne!(gesture, shell.begin_gesture(), "every gesture gets a fresh id");
+        assert_ne!(
+            gesture,
+            shell.begin_gesture(),
+            "every gesture gets a fresh id"
+        );
         for temporal in [4.0_f32, 8.0, 12.0] {
             shell
                 .chain_replace_gestured(0, denoise(temporal), gesture)
@@ -1383,8 +1384,7 @@ mod tests {
         let mut shell = ShellModel::new();
         shell.add_to_queue("a.mkv");
         shell.load_recipe(
-            Recipe::new("a.mkv", ExportPreset::Access)
-                .push(ModuleId::Denoise.default_operation()),
+            Recipe::new("a.mkv", ExportPreset::Access).push(ModuleId::Denoise.default_operation()),
         );
         let first = shell.begin_gesture();
         shell
@@ -1422,8 +1422,7 @@ mod tests {
         let mut shell = ShellModel::new();
         shell.add_to_queue("a.mkv");
         shell.load_recipe(
-            Recipe::new("a.mkv", ExportPreset::Access)
-                .push(ModuleId::Denoise.default_operation()),
+            Recipe::new("a.mkv", ExportPreset::Access).push(ModuleId::Denoise.default_operation()),
         );
         let anchor = shell.recipe().cloned().expect("recipe");
         let gesture = shell.begin_gesture();
@@ -1440,7 +1439,11 @@ mod tests {
         shell
             .chain_replace_gestured(0, denoise(9.0), gesture)
             .expect("the gesture continues after a refusal");
-        assert_eq!(shell.sources[0].undo_depth(), 1, "the refusal added no entry");
+        assert_eq!(
+            shell.sources[0].undo_depth(),
+            1,
+            "the refusal added no entry"
+        );
         assert!(shell.undo());
         assert_eq!(shell.recipe().cloned().expect("recipe"), anchor);
     }
@@ -1452,8 +1455,7 @@ mod tests {
         shell.add_to_queue("b.mkv");
         shell.select(0);
         shell.load_recipe(
-            Recipe::new("a.mkv", ExportPreset::Access)
-                .push(ModuleId::Denoise.default_operation()),
+            Recipe::new("a.mkv", ExportPreset::Access).push(ModuleId::Denoise.default_operation()),
         );
         let gesture = shell.begin_gesture();
         shell
@@ -1463,8 +1465,7 @@ mod tests {
         shell.select(1);
         assert!(!shell.can_undo(), "source b has no history of a's gesture");
         shell.load_recipe(
-            Recipe::new("b.mkv", ExportPreset::Access)
-                .push(ModuleId::Finish.default_operation()),
+            Recipe::new("b.mkv", ExportPreset::Access).push(ModuleId::Finish.default_operation()),
         );
         // Reusing the id on another source cannot merge: the stacks are
         // separate, so this starts b's own first entry.
@@ -1481,8 +1482,7 @@ mod tests {
         let mut shell = ShellModel::new();
         shell.add_to_queue("a.mkv");
         shell.load_recipe(
-            Recipe::new("a.mkv", ExportPreset::Access)
-                .push(ModuleId::Denoise.default_operation()),
+            Recipe::new("a.mkv", ExportPreset::Access).push(ModuleId::Denoise.default_operation()),
         );
         let gesture = shell.begin_gesture();
         shell
@@ -1493,7 +1493,11 @@ mod tests {
             .expect("tick");
         let json = serde_json::to_string(&shell).expect("serialize");
         let back: ShellModel = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.sources[0].undo_depth(), 1, "coalescing survives saving");
+        assert_eq!(
+            back.sources[0].undo_depth(),
+            1,
+            "coalescing survives saving"
+        );
         assert!(back.undo());
         match &back.recipe().expect("recipe").operations[0] {
             // The anchor is the pre-gesture default, temporal strength 3.
