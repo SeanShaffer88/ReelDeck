@@ -469,7 +469,7 @@ impl ShellModel {
                 .saturating_sub(delta.unsigned_abs());
         }
         self.timeline
-            .seek_secs(self.timeline.rate.secs_for_frame(self.viewer.current_frame));
+            .track_playhead(self.timeline.rate.secs_for_frame(self.viewer.current_frame));
     }
 
     /// Seek both the viewer and the playhead from a timeline click.
