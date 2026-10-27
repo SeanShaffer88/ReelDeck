@@ -166,10 +166,14 @@ impl ViewerMode {
     pub fn purpose(self) -> &'static str {
         match self {
             ViewerMode::Program => "The picture, for judging the image itself.",
-            ViewerMode::Waveform => "Luma levels across the frame: clipping and crushing show here.",
+            ViewerMode::Waveform => {
+                "Luma levels across the frame: clipping and crushing show here."
+            }
             ViewerMode::Histogram => "The distribution of levels, for exposure decisions.",
             ViewerMode::Vectorscope => "Chroma hue and saturation, for cast and bleed.",
-            ViewerMode::FieldSplit => "The two fields apart: combing and wrong field order are obvious.",
+            ViewerMode::FieldSplit => {
+                "The two fields apart: combing and wrong field order are obvious."
+            }
             ViewerMode::TemporalDifference => {
                 "Change from the previous frame: dropouts and frozen spans stand out."
             }
@@ -459,11 +463,8 @@ impl ShellModel {
                 .current_frame
                 .saturating_sub(delta.unsigned_abs());
         }
-        self.timeline.seek_secs(
-            self.timeline
-                .rate
-                .secs_for_frame(self.viewer.current_frame),
-        );
+        self.timeline
+            .seek_secs(self.timeline.rate.secs_for_frame(self.viewer.current_frame));
     }
 
     /// Seek both the viewer and the playhead from a timeline click.
@@ -490,8 +491,10 @@ impl ShellModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rd_core::{DeinterlaceEngine, DenoiseEngine, ExportPreset, FieldOrder, Operation, OutputRate};
     use rd_analyze::{Anomaly, FrameStats};
+    use rd_core::{
+        DeinterlaceEngine, DenoiseEngine, ExportPreset, FieldOrder, Operation, OutputRate,
+    };
 
     fn chain_model() -> ShellModel {
         let mut shell = ShellModel::new();
@@ -584,10 +587,7 @@ mod tests {
     #[test]
     fn filter_string_comes_from_the_planner() {
         let shell = chain_model();
-        let chain = shell
-            .chain_filter()
-            .expect("recipe loaded")
-            .expect("plans");
+        let chain = shell.chain_filter().expect("recipe loaded").expect("plans");
         assert_eq!(chain, "bwdif=mode=send_field:parity=tff:deint=all");
         // And it matches what the pipeline would export.
         let plan = rd_pipeline::export_plan(
@@ -665,7 +665,10 @@ mod tests {
             .expect("replace");
         assert!(shell.preview_gate().is_some());
         assert!(!shell.export_gate_open());
-        assert!(!shell.export_checks().iter().all(|c| c.level != CheckLevel::Blocked));
+        assert!(!shell
+            .export_checks()
+            .iter()
+            .all(|c| c.level != CheckLevel::Blocked));
 
         shell.previewed = true;
         assert!(shell.export_gate_open());
@@ -697,16 +700,21 @@ mod tests {
 
         shell.add_to_queue("a.mkv");
         assert!(shell.stage_access(Stage::Inspect).available);
-        assert!(!shell.stage_access(Stage::Decide).available, "inspection first");
+        assert!(
+            !shell.stage_access(Stage::Decide).available,
+            "inspection first"
+        );
 
         shell.queue[0].inspect = InspectStatus::Inspected;
         shell.recipe = Some(
-            Recipe::new("a.mkv", ExportPreset::Access)
-                .push(ModuleId::Denoise.default_operation()),
+            Recipe::new("a.mkv", ExportPreset::Access).push(ModuleId::Denoise.default_operation()),
         );
         assert!(shell.stage_access(Stage::Decide).available);
         assert!(shell.stage_access(Stage::Preview).available);
-        assert!(!shell.stage_access(Stage::Export).available, "preview first");
+        assert!(
+            !shell.stage_access(Stage::Export).available,
+            "preview first"
+        );
         shell.previewed = true;
         assert!(shell.stage_access(Stage::Export).available);
         assert!(!shell.stage_access(Stage::Prove).available, "no output yet");
@@ -729,7 +737,11 @@ mod tests {
         assert!(pinned.export_facts().source_pinned);
         let checks = pinned.export_checks();
         assert_eq!(
-            checks.iter().find(|c| c.id == "fixity").expect("check").level,
+            checks
+                .iter()
+                .find(|c| c.id == "fixity")
+                .expect("check")
+                .level,
             CheckLevel::Pass
         );
         assert!(!shell.expert_override);

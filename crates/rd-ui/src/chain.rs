@@ -190,7 +190,12 @@ pub fn add_module(recipe: &mut Recipe, id: ModuleId) -> Result<usize, ChainEditE
     if recipe.operations.iter().any(|op| ModuleId::of(op) == id) {
         return Err(ChainEditError::AlreadyPresent(id));
     }
-    let rank = |m: ModuleId| ModuleId::ALL.iter().position(|x| *x == m).unwrap_or(usize::MAX);
+    let rank = |m: ModuleId| {
+        ModuleId::ALL
+            .iter()
+            .position(|x| *x == m)
+            .unwrap_or(usize::MAX)
+    };
     let index = recipe
         .operations
         .iter()
@@ -218,7 +223,11 @@ pub fn insert_step(
     if index > recipe.operations.len() {
         return Err(ChainEditError::NoSuchStep(index));
     }
-    if recipe.operations.iter().any(|o| ModuleId::of(o) == ModuleId::of(&op)) {
+    if recipe
+        .operations
+        .iter()
+        .any(|o| ModuleId::of(o) == ModuleId::of(&op))
+    {
         return Err(ChainEditError::AlreadyPresent(ModuleId::of(&op)));
     }
     recipe.operations.insert(index, op);
@@ -601,7 +610,10 @@ mod tests {
         for id in ModuleId::ALL {
             assert!(!id.label().is_empty());
             assert!(!id.blurb().is_empty());
-            assert!(!id.damage_notes().is_empty(), "{id:?} must state its damage");
+            assert!(
+                !id.damage_notes().is_empty(),
+                "{id:?} must state its damage"
+            );
             assert!(!id.relative_cost().is_empty());
             let op = id.default_operation();
             assert_eq!(ModuleId::of(&op), id);
@@ -749,7 +761,10 @@ mod tests {
     fn aggressive_settings_require_a_preview_with_a_reason() {
         let mut r = recipe();
         add_module(&mut r, ModuleId::Denoise).expect("add");
-        assert!(preview_required(&r).is_none(), "gentle denoise needs no gate");
+        assert!(
+            preview_required(&r).is_none(),
+            "gentle denoise needs no gate"
+        );
 
         replace_step(
             &mut r,
@@ -857,7 +872,10 @@ mod tests {
         });
         assert_eq!(overridden[1].level, CheckLevel::Warn);
         assert!(overridden[1].detail.contains("export log"));
-        assert!(export_is_ready(&overridden), "a recorded override allows the run");
+        assert!(
+            export_is_ready(&overridden),
+            "a recorded override allows the run"
+        );
     }
 
     #[test]
@@ -869,7 +887,10 @@ mod tests {
             output_exists: true,
             ..Default::default()
         });
-        let destination = checks.iter().find(|c| c.id == "destination").expect("check");
+        let destination = checks
+            .iter()
+            .find(|c| c.id == "destination")
+            .expect("check");
         assert_eq!(destination.level, CheckLevel::Blocked);
         assert!(destination.detail.contains("new files"));
 
@@ -912,7 +933,10 @@ mod tests {
             free_bytes: Some(10_000_000_000),
             estimated_bytes: Some(1_000_000_000),
         });
-        assert_eq!(fits.iter().find(|c| c.id == "space").unwrap().level, CheckLevel::Pass);
+        assert_eq!(
+            fits.iter().find(|c| c.id == "space").unwrap().level,
+            CheckLevel::Pass
+        );
 
         let short = export_preflight(&ExportFacts {
             chain_len: 1,

@@ -77,7 +77,9 @@ dependencies = [
 name = "rd-ui"
 version = "0.1.0"
 dependencies = [
+ "rd-analyze",
  "rd-core",
+ "rd-pipeline",
  "serde",
  "serde_json",
  "thiserror",

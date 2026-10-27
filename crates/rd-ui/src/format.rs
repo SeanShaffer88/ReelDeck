@@ -170,7 +170,10 @@ pub fn percent(fraction: f64) -> String {
 mod tests {
     use super::*;
 
-    const NTSC: FrameRate = FrameRate { num: 30000, den: 1001 };
+    const NTSC: FrameRate = FrameRate {
+        num: 30000,
+        den: 1001,
+    };
     const PAL: FrameRate = FrameRate { num: 25, den: 1 };
 
     #[test]
@@ -188,7 +191,14 @@ mod tests {
     fn frame_rate_display_trims_without_lying() {
         assert_eq!(PAL.display(), "25");
         assert_eq!(NTSC.display(), "29.97");
-        assert_eq!(FrameRate { num: 24000, den: 1001 }.display(), "23.976");
+        assert_eq!(
+            FrameRate {
+                num: 24000,
+                den: 1001
+            }
+            .display(),
+            "23.976"
+        );
         assert_eq!(FrameRate { num: 50, den: 1 }.display(), "50");
     }
 
@@ -237,9 +247,18 @@ mod tests {
     #[test]
     fn position_honours_the_preference() {
         let secs = PAL.secs_for_frame(25 * 61 + 3);
-        assert_eq!(position(25 * 61 + 3, secs, PAL, TimeDisplay::Timecode), "00:01:01:03");
-        assert_eq!(position(25 * 61 + 3, secs, PAL, TimeDisplay::Clock), "00:01:01.120");
-        assert_eq!(position(25 * 61 + 3, secs, PAL, TimeDisplay::Frames), "1528");
+        assert_eq!(
+            position(25 * 61 + 3, secs, PAL, TimeDisplay::Timecode),
+            "00:01:01:03"
+        );
+        assert_eq!(
+            position(25 * 61 + 3, secs, PAL, TimeDisplay::Clock),
+            "00:01:01.120"
+        );
+        assert_eq!(
+            position(25 * 61 + 3, secs, PAL, TimeDisplay::Frames),
+            "1528"
+        );
     }
 
     #[test]

@@ -59,11 +59,15 @@ impl Stage {
             Stage::Decide => {
                 "Build the ordered chain. Every step shows its damage note and its exact filter."
             }
-            Stage::Preview => "Judge a segment — chosen where the footage is worst — before committing.",
+            Stage::Preview => {
+                "Judge a segment — chosen where the footage is worst — before committing."
+            }
             Stage::Export => {
                 "Choose one intent. Every export writes its recipe and export log beside it."
             }
-            Stage::Prove => "Check the output against its proof. A check without evidence is a skip.",
+            Stage::Prove => {
+                "Check the output against its proof. A check without evidence is a skip."
+            }
         }
     }
 
@@ -75,7 +79,10 @@ impl Stage {
             Stage::Inspect => &["a queued source"],
             Stage::Decide => &["an inspection report"],
             Stage::Preview => &["a chain with at least one operation"],
-            Stage::Export => &["a validated chain", "a preview of it, or an expert override"],
+            Stage::Export => &[
+                "a validated chain",
+                "a preview of it, or an expert override",
+            ],
             Stage::Prove => &["a finished output"],
         }
     }
@@ -223,10 +230,17 @@ mod tests {
 
     #[test]
     fn ingest_is_always_open_and_later_stages_gate_on_evidence() {
-        assert!(Stage::Ingest.access(false, false, 0, false, false).available);
+        assert!(
+            Stage::Ingest
+                .access(false, false, 0, false, false)
+                .available
+        );
         for stage in Stage::ALL[1..].iter() {
             let access = stage.access(false, false, 0, false, false);
-            assert!(!access.available, "{stage:?} must be blocked with no source");
+            assert!(
+                !access.available,
+                "{stage:?} must be blocked with no source"
+            );
             assert!(
                 access.blocked_by.as_deref().is_some_and(|s| !s.is_empty()),
                 "{stage:?} must say why it is blocked"
@@ -236,7 +250,11 @@ mod tests {
 
     #[test]
     fn each_stage_opens_when_its_evidence_exists() {
-        assert!(Stage::Inspect.access(true, false, 0, false, false).available);
+        assert!(
+            Stage::Inspect
+                .access(true, false, 0, false, false)
+                .available
+        );
         // A source that has not been inspected still cannot be decided on.
         assert!(!Stage::Decide.access(true, false, 1, false, false).available);
         assert!(Stage::Decide.access(true, true, 1, false, false).available);

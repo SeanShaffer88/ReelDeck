@@ -69,7 +69,11 @@ pub enum TimeDisplay {
 }
 
 impl TimeDisplay {
-    pub const ALL: [TimeDisplay; 3] = [TimeDisplay::Timecode, TimeDisplay::Clock, TimeDisplay::Frames];
+    pub const ALL: [TimeDisplay; 3] = [
+        TimeDisplay::Timecode,
+        TimeDisplay::Clock,
+        TimeDisplay::Frames,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -181,7 +185,10 @@ mod tests {
         prefs.time_display = TimeDisplay::Frames;
         prefs.safe_areas = true;
         let json = prefs.to_json().expect("serialize");
-        assert_eq!(WorkspacePrefs::from_json(&json).expect("deserialize"), prefs);
+        assert_eq!(
+            WorkspacePrefs::from_json(&json).expect("deserialize"),
+            prefs
+        );
     }
 
     #[test]

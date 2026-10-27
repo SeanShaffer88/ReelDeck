@@ -66,7 +66,11 @@ impl MetricLane {
             return (0.0, 1.0);
         }
         if (max - min).abs() < f64::EPSILON {
-            let pad = if max.abs() > 0.0 { max.abs() * 0.1 } else { 1.0 };
+            let pad = if max.abs() > 0.0 {
+                max.abs() * 0.1
+            } else {
+                1.0
+            };
             return (min - pad, max + pad);
         }
         let pad = (max - min) * 0.08;
@@ -156,12 +160,15 @@ pub fn lanes_from_stats(stats: &[FrameStats], tout_threshold: f64) -> Vec<Metric
         lane("y_avg", "Luma", " y", Some((16.0, 235.0)), None, &|s| {
             s.y_avg
         }),
-        lane("sat_avg", "Saturation", "", None, None, &|s| {
-            s.sat_avg
-        }),
-        lane("tout", "Temporal outliers", "", Some((0.0, 1.0)), Some(tout_threshold), &|s| {
-            s.tout
-        }),
+        lane("sat_avg", "Saturation", "", None, None, &|s| s.sat_avg),
+        lane(
+            "tout",
+            "Temporal outliers",
+            "",
+            Some((0.0, 1.0)),
+            Some(tout_threshold),
+            &|s| s.tout,
+        ),
         lane("brng", "Out of range", "", Some((0.0, 1.0)), None, &|s| {
             s.brng
         }),
@@ -257,7 +264,9 @@ pub fn marks_from_anomalies(anomalies: &[Anomaly]) -> Vec<TimelineMark> {
                 start_secs: pts_time,
                 end_secs: pts_time,
                 frame: Some(frame),
-                detail: format!("Temporal outlier at {pts_time:.2}s (frame {frame}, TOUT {tout:.4})"),
+                detail: format!(
+                    "Temporal outlier at {pts_time:.2}s (frame {frame}, TOUT {tout:.4})"
+                ),
             },
         })
         .collect()
@@ -379,7 +388,9 @@ impl TimelineModel {
     pub fn marks_in(&self, range: RangeSelection) -> Vec<&TimelineMark> {
         self.marks
             .iter()
-            .filter(|m| m.end_secs.max(m.start_secs) >= range.in_secs && m.start_secs <= range.out_secs)
+            .filter(|m| {
+                m.end_secs.max(m.start_secs) >= range.in_secs && m.start_secs <= range.out_secs
+            })
             .collect()
     }
 
@@ -507,7 +518,10 @@ mod tests {
         let mut values = vec![200.0; 500];
         values[201] = 3.0;
         let buckets = lane(values).buckets(50);
-        assert_eq!(buckets.iter().map(|b| b.min).fold(f64::INFINITY, f64::min), 3.0);
+        assert_eq!(
+            buckets.iter().map(|b| b.min).fold(f64::INFINITY, f64::min),
+            3.0
+        );
     }
 
     #[test]
@@ -586,7 +600,10 @@ mod tests {
         t.seek_secs(99.0);
         assert_eq!(t.playhead_secs, 10.0);
         t.seek_secs(f64::NAN);
-        assert_eq!(t.playhead_secs, 10.0, "a NaN seek is ignored, not clamped to 0");
+        assert_eq!(
+            t.playhead_secs, 10.0,
+            "a NaN seek is ignored, not clamped to 0"
+        );
         t.seek_secs(1.0);
         assert_eq!(t.frame(), 25);
         t.step_frames(-3);
@@ -662,7 +679,10 @@ mod tests {
             },
         ]);
         let range = t.suggested_preview_range(10.0).expect("range");
-        assert!((range.in_secs - 43.0).abs() < 1e-9, "centred on the outlier at 48s");
+        assert!(
+            (range.in_secs - 43.0).abs() < 1e-9,
+            "centred on the outlier at 48s"
+        );
         assert!((range.duration() - 10.0).abs() < 1e-9);
 
         // Near the end, the span slides inward instead of overflowing.
@@ -683,7 +703,9 @@ mod tests {
         let range = t.suggested_preview_range(8.0).expect("range");
         assert!((range.in_secs - 36.0).abs() < 1e-6, "{range:?}");
 
-        assert!(TimelineModel::new(0.0, PAL).suggested_preview_range(10.0).is_none());
+        assert!(TimelineModel::new(0.0, PAL)
+            .suggested_preview_range(10.0)
+            .is_none());
     }
 
     #[test]
