@@ -527,7 +527,7 @@ visual reference, not the shipping binary.
 | Format and lints (`cargo fmt --check`, clippy with `-D warnings`) | **Pass** | CI |
 | Release build (workspace) | **Pass** | CI |
 | Prototype structure and flow (boot, gating, chain edits, preview, export, verify, preferences) | Exercised headlessly (jsdom): no page errors; expected states reached | Authoring run (scripts not committed) |
-| Accessibility (WCAG 2.1 A/AA) | **0 axe-core violations** on the shell, shortcuts, preferences and export panels | Authoring run (axe-core 4.11, jsdom) |
+| Accessibility (WCAG 2.1 A/AA) | **0 axe-core violations** on the shell, shortcuts, preferences and export panels | Authoring run (axe-core 4.14, jsdom) |
 | Colour contrast | Reviewed against the token table; contrast targets stated in §3.1. Not machine-measured (no layout engine in the audit environment) | — |
 | Typography, spacing, layout at 1440/1280/1024/860 logical widths | Designed against §4.3; **not** confirmed by rendering on a display | — |
 | Pixel rendering on a real display or GPU | **Not verified** — no usable browser in the authoring environment | — |
