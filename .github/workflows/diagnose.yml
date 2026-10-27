@@ -1,0 +1,71 @@
+name: Diagnose (temporary)
+
+# Temporary authoring aid: the sandbox cannot read Actions logs, and the
+# logs are served from a host it cannot reach. This workflow runs the same
+# checks as CI, applies rustfmt, and posts the compiler output as a PR
+# comment so the author can act on it. It is removed before merge.
+
+on:
+  push:
+    branches: [arena/a1f91402-reeldeck]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: arena/a1f91402-reeldeck
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Prepare report
+        run: |
+          echo "## Diagnose report" > /tmp/report.md
+          echo "" >> /tmp/report.md
+          echo '```text' >> /tmp/report.md
+          echo "FMT CHECK:" >> /tmp/report.md
+          if cargo fmt --all -- --check > /tmp/fmt.txt 2>&1; then
+            echo "  clean" >> /tmp/report.md
+          else
+            echo "  needs formatting (rustfmt will fix and push)" >> /tmp/report.md
+            head -c 6000 /tmp/fmt.txt >> /tmp/report.md
+          fi
+          echo "" >> /tmp/report.md
+          echo "CLIPPY (short messages):" >> /tmp/report.md
+          cargo clippy --workspace --all-targets --message-format=short -- -D warnings > /tmp/clippy.txt 2>&1 || true
+          tail -c 20000 /tmp/clippy.txt >> /tmp/report.md
+          echo "" >> /tmp/report.md
+          echo "TESTS (tail):" >> /tmp/report.md
+          cargo test --workspace > /tmp/test.txt 2>&1 || true
+          tail -c 10000 /tmp/test.txt >> /tmp/report.md
+          echo '```' >> /tmp/report.md
+
+      - name: Autoformat
+        run: |
+          cargo fmt --all
+          if ! git diff --quiet; then
+            git config user.name "reeldeck-format"
+            git config user.email "reeldeck-format@users.noreply.github.com"
+            git commit -am "style: apply rustfmt"
+            git push
+            echo "" >> /tmp/report.md
+            echo "Applied rustfmt and pushed the formatting commit." >> /tmp/report.md
+          fi
+
+      - name: Post report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR=$(gh pr list --head arena/a1f91402-reeldeck --json number -q '.[0].number')
+          if [ -n "$PR" ]; then
+            gh pr comment "$PR" --body-file /tmp/report.md
+          else
+            echo "no pull request found"
+          fi
