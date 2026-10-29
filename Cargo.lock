@@ -90,6 +90,7 @@ dependencies = [
  "rd-analyze",
  "rd-core",
  "rd-pipeline",
+ "rd-run",
  "serde",
  "serde_json",
  "thiserror",

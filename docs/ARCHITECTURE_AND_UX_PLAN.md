@@ -157,8 +157,8 @@ rd-pipeline   Filter-graph / VapourSynth-script planning, two-pass
               executes in v0.1; execution arrives behind the same plans.
 rd-ui         Shell state model (queue / viewer / chain / jobs); no
               framework code yet — see the GUI decision below
-reeldeck      CLI binary: inspect | plan | hash | version
-              (preview / export / rerun / verify join as slices land)
+reeldeck      CLI binary: inspect | plan | export | preview | verify |
+              rerun | batch | hash | version
 ```
 
 - **Engine:** FFmpeg (a pinned build; note that the stabilization library

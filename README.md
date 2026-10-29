@@ -81,13 +81,13 @@ leaves the disk.
 
 | Crate | Role |
 | ----- | ---- |
-| `crates/rd-core` | Pure logic: recipe + export-log model, validation, SHA-256 fixity, export verification. No FFI. |
+| `crates/rd-core` | Pure logic: recipe + export-log model, batch manifest + state, validation, SHA-256 fixity, export verification. No FFI. |
 | `crates/rd-analyze` | ffprobe / signalstats / detect-filter / idet parsing into a typed inspection model, plus the sampled-range `analyze` pass that runs the tools. Its header-level probe asks MediaKit first and falls back to ffprobe. |
 | `crates/rd-mediakit` | Safe wrapper over the MediaKit DLL (vendored under `crates/rd-analyze/native/`): header-level media probing on Windows, an honest unavailable error elsewhere. The workspace's only FFI crate. |
 | `crates/rd-pipeline` | Planning: recipe → filter strings, two-pass stabilization plan, export argument vectors. Plans only; never executes. |
-| `crates/rd-run` | Execution: runs plans with FFmpeg (fixity gate, never-overwrite, measured progress, cancellation) and writes the recipe + export-log proof beside every output. |
+| `crates/rd-run` | Execution: runs plans with FFmpeg (fixity gate, never-overwrite, measured progress, cancellation) and writes the recipe + export-log proof beside every output; runs resumable batches. |
 | `crates/rd-ui` | Interface state model and design system: workflow stages and gates, per-source chain state with undo/redo, chain editing and guards, timeline lanes/marks, formatting, preferences, commands, pre-export checks — plus a framework-neutral shell prototype. |
-| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `hash`, `version`. |
+| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `batch`, `hash`, `version`. |
 
 ## Building from source
 
@@ -185,6 +185,46 @@ run directly with `export`:
 
 ```sh
 cargo run -p reeldeck -- rerun restored.mkv.export-log.json
+```
+
+`batch` renders many recipes in order, one source at a time, each
+with its own recipe and export-log proof. The manifest lists the
+entries; relative paths resolve against the manifest's folder, and
+`input`/`output` default to the recipe's source and
+`<source-stem>.restored.<ext>`:
+
+```json
+{
+  "schema_version": 1,
+  "entries": [
+    { "recipe": "tape01.recipe.json" },
+    { "recipe": "tape02.recipe.json", "input": "captures/tape02.mkv", "output": "masters/tape02.mkv" }
+  ]
+}
+```
+
+Everything is checked before anything renders: every recipe must
+load and validate, no two entries may write the same output, and no
+output may be any entry's source. Progress is saved after every step
+to `<manifest>.state.json` (written atomically), and the batch stops
+at the first failure. Running the same command again resumes there:
+
+- entries that already succeeded are skipped, after their outputs are
+  re-hashed against the recorded SHA-256 — a missing or changed
+  output stops the batch instead of being counted as done;
+- a retry writes to a new attempt name (`tape02.attempt2.mkv`), so
+  the failed attempt's proof sidecars are never touched;
+- an attempt left running by a crash or a killed process is recorded
+  as interrupted and retried;
+- if the manifest or any recipe changed since the batch started, the
+  resume refuses rather than mixing two batches in one record.
+
+```sh
+cargo run -p reeldeck -- batch batch.json
+# Render the remaining entries even after one fails
+cargo run -p reeldeck -- batch batch.json --keep-going
+# Print the saved state without rendering
+cargo run -p reeldeck -- batch batch.json --status
 ```
 
 Checks every change must pass (also run by CI):

@@ -38,6 +38,8 @@ use thiserror::Error;
 use rd_core::{is_sha256_hex, sha256_file, sha256_hex, ExportLog, Recipe};
 use rd_pipeline::{ExportPlan, PipelineError};
 
+pub mod batch;
+
 // ---------------------------------------------------------------------------
 // Timestamps
 // ---------------------------------------------------------------------------

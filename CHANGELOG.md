@@ -28,6 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Batch queue: `reeldeck batch <manifest.json> [--keep-going]
+  [--status]` renders a manifest's recipes in order, each with its
+  own recipe and export-log proof. `rd-core` gains the versioned
+  manifest and state model (`BatchManifest`, `BatchState`, one
+  record per attempt); `rd-run` gains the runner (`rd_run::batch`).
+  Every entry is validated before anything renders, and outputs may
+  not collide with each other or with any source. The state is saved
+  atomically to `<manifest>.state.json` after every transition; the
+  batch stops at the first failure (unless `--keep-going`) and the
+  next run resumes there. On resume, succeeded outputs are re-hashed
+  and a missing or changed one stops the batch; retries write to a new
+  attempt name so earlier proof is never touched; attempts left
+  running by a crash are recorded as interrupted and retried; and a
+  changed manifest or recipe refuses to resume. No new dependency.
+
 - MediaKit probe at intake: `rd-analyze`'s probe now asks MediaKit
   for header-level facts first (container, duration, bitrate, and
   per-stream codec, dimensions, sample rate, and channels) and

@@ -592,8 +592,9 @@ and cancel flag left to the shipping shell.
 
 1. **Lossless segment export** — the preview range becomes a stream-copy
    cut with its own proof; the trim model does not exist yet.
-2. **Batch queue** — per-file state transitions already gated; needs a
-   queue runner and resume.
+2. **Batch queue in the shell** — the runner and resume exist
+   (`rd_run::batch`, `reeldeck batch`); the queue panel still needs to
+   drive it and show per-file state from `BatchState`.
 3. **Proxies** — scrubbing long files at full resolution is the next
    performance cliff.
 4. **Framework spike** (§10) and a real-display visual pass.

@@ -41,14 +41,16 @@ done when its criteria pass, not when its code merely compiles.
 - [x] Rerun-a-recipe (`reeldeck rerun`, with a determinism report
   against the recorded run) + verify (hash comparison,
   `reeldeck verify`)
-- [ ] Batch queue
+- [x] Batch queue (`reeldeck batch`): per-file state saved after every
+  step, stop at the failed file and resume there, re-verified skips
 - VapourSynth/QTGMC as the optional archival tier
 
 ## v0.4 — Cutting and throughput
 
 - Lossless, keyframe-snapped segment export (stream copy) with its own
   proof, kept distinct from a re-encode
-- Batch queue: per-file state, resume at the failed file, copy settings
+- Batch queue: copy settings across sources, and the queue in the shell
+  (per-file state and resume landed in v0.3)
 - Proxy media for scrubbing long captures
 - Chapter and attachment preservation for Matroska masters
 - Scene-change detection as timeline markers

@@ -11,11 +11,16 @@
 
 #![forbid(unsafe_code)]
 
+pub mod batch;
 pub mod hash;
 pub mod log;
 pub mod recipe;
 pub mod verify;
 
+pub use batch::{
+    attempt_output_path, Attempt, AttemptOutcome, BatchCounts, BatchEntry, BatchError,
+    BatchManifest, BatchState, EntryState, EntryStatus, BATCH_SCHEMA_VERSION,
+};
 pub use hash::{is_sha256_hex, sha256_digest, sha256_file, sha256_hex, Sha256};
 pub use log::ExportLog;
 pub use recipe::{

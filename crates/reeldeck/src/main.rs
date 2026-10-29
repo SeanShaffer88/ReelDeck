@@ -19,6 +19,9 @@
 //!   reeldeck rerun <log.json>     Re-run a recorded export's recipe
 //!                                 and compare the new output's hash
 //!                                 with the recorded one
+//!   reeldeck batch <manifest.json> Render a manifest's recipes in
+//!                                 order; a stopped batch resumes at
+//!                                 the entry that did not finish
 //!   reeldeck hash <file>          Print the file's SHA-256
 //!   reeldeck version              Print the version
 
@@ -41,6 +44,7 @@ fn main() -> ExitCode {
         Some("preview") => cmd_preview(&args[1..]),
         Some("verify") => cmd_verify(&args[1..]),
         Some("rerun") => cmd_rerun(&args[1..]),
+        Some("batch") => cmd_batch(&args[1..]),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_usage();
             0
@@ -84,6 +88,13 @@ fn print_usage() {
          \x20                               file bytes first, then the elementary\n\
          \x20                               streams, so container metadata is not\n\
          \x20                               mistaken for a changed picture\n\
+         \x20 reeldeck batch <manifest.json> [--keep-going] [--status]\n\
+         \x20                               Render every recipe in a manifest, in order,\n\
+         \x20                               each with its own proof. Progress is saved to\n\
+         \x20                               <manifest>.state.json; run it again to resume\n\
+         \x20                               at the entry that did not finish. Stops at the\n\
+         \x20                               first failure unless --keep-going; --status\n\
+         \x20                               prints the saved state without rendering\n\
          \x20 reeldeck hash <file>          Print the file's SHA-256\n\
          \x20 reeldeck version              Print the version"
     );
@@ -1411,6 +1422,194 @@ fn print_version_comparison(recorded: &rd_core::ExportLog, new_log: Option<&rd_c
     }
 }
 
+const BATCH_USAGE: &str = "reeldeck batch <manifest.json> [--keep-going] [--status]";
+
+struct BatchArgs {
+    manifest: PathBuf,
+    keep_going: bool,
+    status_only: bool,
+}
+
+fn parse_batch_args(args: &[String]) -> Result<BatchArgs, u8> {
+    let mut manifest = None;
+    let mut keep_going = false;
+    let mut status_only = false;
+    for arg in args {
+        match arg.as_str() {
+            "--keep-going" => keep_going = true,
+            "--status" => status_only = true,
+            flag if flag.starts_with("--") => {
+                eprintln!("reeldeck batch: unknown flag '{flag}'");
+                eprintln!("usage: {BATCH_USAGE}");
+                return Err(2);
+            }
+            _ if manifest.is_some() => {
+                eprintln!("reeldeck batch: unexpected extra argument '{arg}'");
+                eprintln!("usage: {BATCH_USAGE}");
+                return Err(2);
+            }
+            _ => manifest = Some(PathBuf::from(arg)),
+        }
+    }
+    match manifest {
+        Some(manifest) => Ok(BatchArgs {
+            manifest,
+            keep_going,
+            status_only,
+        }),
+        None => {
+            eprintln!("usage: {BATCH_USAGE}");
+            Err(2)
+        }
+    }
+}
+
+fn cmd_batch(args: &[String]) -> i32 {
+    let parsed = match parse_batch_args(args) {
+        Ok(p) => p,
+        Err(c) => return c as i32,
+    };
+    if parsed.status_only {
+        return match rd_run::batch::load_state(&parsed.manifest) {
+            Ok(Some(state)) => {
+                print_batch_state(&state);
+                0
+            }
+            Ok(None) => {
+                println!(
+                    "Batch {} has not started (no {}).",
+                    parsed.manifest.display(),
+                    rd_run::batch::state_path_for(&parsed.manifest).display()
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("reeldeck batch: {e}");
+                1
+            }
+        };
+    }
+
+    let opts = rd_run::batch::BatchOptions {
+        keep_going: parsed.keep_going,
+        cancel: Arc::new(AtomicBool::new(false)),
+        on_event: Some(Arc::new(std::sync::Mutex::new(
+            |event: &rd_run::batch::BatchEvent| print_batch_event(event),
+        ))),
+    };
+    let report = match rd_run::batch::run_batch(&parsed.manifest, opts) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("reeldeck batch: {e}");
+            return 1;
+        }
+    };
+    println!();
+    print_batch_state(&report.state);
+    println!("State: {}", report.state_path.display());
+    if report.is_complete() {
+        return 0;
+    }
+    if let Some(i) = report.state.next_unfinished() {
+        let status = report.state.entries[i].status;
+        if report.cancelled {
+            eprintln!("reeldeck batch: cancelled at entry {}.", i + 1);
+        } else if status == rd_core::EntryStatus::Failed {
+            eprintln!(
+                "reeldeck batch: stopped; entry {} failed. Fix the cause and run the same command again to resume at entry {}.",
+                i + 1,
+                i + 1
+            );
+        } else {
+            eprintln!(
+                "reeldeck batch: unfinished; run the same command again to resume at entry {}.",
+                i + 1
+            );
+        }
+    }
+    1
+}
+
+fn print_batch_event(event: &rd_run::batch::BatchEvent) {
+    use rd_run::batch::BatchEvent;
+    match event {
+        BatchEvent::Skipped { index, output } => {
+            println!(
+                "[{index}] skip: already succeeded, output re-verified ({})",
+                output.display()
+            );
+        }
+        BatchEvent::Started {
+            index,
+            attempt,
+            input,
+            output,
+        } => {
+            let retry = if *attempt > 1 {
+                format!(" (attempt {attempt})")
+            } else {
+                String::new()
+            };
+            println!(
+                "[{index}] start: {} -> {}{retry}",
+                input.display(),
+                output.display()
+            );
+        }
+        BatchEvent::Progress { index, progress } => {
+            println!(
+                "[{index}] frame {}  fps {:.1}  speed {:.2}x",
+                progress.frame, progress.fps, progress.speed
+            );
+        }
+        BatchEvent::Finished {
+            index,
+            status,
+            detail,
+        } => {
+            if *status == rd_core::EntryStatus::Succeeded {
+                println!("[{index}] succeeded: SHA-256 {detail}");
+            } else {
+                println!("[{index}] {}: {detail}", status.label());
+            }
+        }
+    }
+}
+
+fn print_batch_state(state: &rd_core::BatchState) {
+    let counts = state.counts();
+    println!(
+        "Batch: {} entries: {} succeeded, {} failed, {} cancelled, {} pending, {} interrupted",
+        state.entries.len(),
+        counts.succeeded,
+        counts.failed,
+        counts.cancelled,
+        counts.pending,
+        counts.running
+    );
+    for (i, entry) in state.entries.iter().enumerate() {
+        let attempts = entry.attempts.len();
+        let output = entry
+            .last_attempt()
+            .map(|a| a.output.as_str())
+            .unwrap_or(entry.output.as_str());
+        println!(
+            "  {:>3}. {:<10} {} -> {} ({} attempt{})",
+            i + 1,
+            entry.status.label(),
+            entry.input,
+            output,
+            attempts,
+            if attempts == 1 { "" } else { "s" }
+        );
+        if let Some(error) = entry.last_attempt().and_then(|a| a.error.as_deref()) {
+            if entry.status != rd_core::EntryStatus::Succeeded {
+                println!("       {error}");
+            }
+        }
+    }
+}
+
 /// `capture.restored.mkv` -> `capture.restored.rerun.mkv`: the rerun
 /// is a new file beside the caller's working directory, visibly a
 /// rerun of the recorded output.
@@ -1765,6 +1964,28 @@ mod tests {
         let (found, _) = resolve_beside("elsewhere/media.mkv", Some(&dir));
         assert_eq!(found, Some(beside));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_batch_args_accepts_manifest_and_flags() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let parsed = parse_batch_args(&args(&["b.json", "--keep-going"])).expect("parse");
+        assert_eq!(parsed.manifest, PathBuf::from("b.json"));
+        assert!(parsed.keep_going && !parsed.status_only);
+        assert!(
+            parse_batch_args(&args(&["--status", "b.json"]))
+                .expect("parse")
+                .status_only
+        );
+        assert_eq!(parse_batch_args(&args(&[])).err(), Some(2));
+        assert_eq!(
+            parse_batch_args(&args(&["a.json", "b.json"])).err(),
+            Some(2)
+        );
+        assert_eq!(
+            parse_batch_args(&args(&["b.json", "--bogus"])).err(),
+            Some(2)
+        );
     }
 
     #[test]
