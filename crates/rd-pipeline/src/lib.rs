@@ -35,13 +35,43 @@ pub enum PipelineError {
     StabilizationWithCut,
     #[error("keeping several ranges in one file needs to know whether the source has audio; probe the source first")]
     AudioUnknown,
+    #[error("stabilization cannot be combined with joined sources: its analysis pass reads one input; join first, then stabilize the joined output")]
+    StabilizationWithJoin,
+    #[error("joining needs the picture size, codecs and audio of every source, and source {0} could not be probed")]
+    JoinFactsUnknown(usize),
+    #[error("these sources cannot be joined as they are: {0}")]
+    JoinMismatch(String),
 }
 
-/// Facts about the source that a recipe does not carry and some plans
-/// need. Unknown facts stay `None`; a plan that needs one refuses.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Facts about one source that a recipe does not carry and some plans
+/// need, from a probe. Unknown facts stay `None`; a plan that needs one
+/// refuses rather than guessing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceFacts {
     pub has_audio: Option<bool>,
+    /// First video stream's width and height.
+    pub size: Option<(u32, u32)>,
+    pub video_codec: Option<String>,
+    /// First audio stream's codec, when there is audio.
+    pub audio_codec: Option<String>,
+}
+
+/// The concat-demuxer list a lossless join reads: the executor writes it
+/// at `path` from `entries` (one source path each, in order) with
+/// [`concat_list_text`] before the run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConcatList {
+    pub path: String,
+    pub entries: Vec<String>,
+}
+
+/// The concat demuxer's list file: `file '<path>'` per line, with single
+/// quotes escaped the way the demuxer reads them.
+pub fn concat_list_text(entries: &[String]) -> String {
+    entries
+        .iter()
+        .map(|e| format!("file '{}'\n", e.replace('\'', "'\\''")))
+        .collect()
 }
 
 /// Format an f32 the way filter strings want it: integers without a
@@ -324,6 +354,9 @@ pub struct ExportPlan {
     /// each one in the export log.
     #[serde(default)]
     pub notices: Vec<String>,
+    /// For a lossless join: the list file the executor must write first.
+    #[serde(default)]
+    pub concat_list: Option<ConcatList>,
 }
 
 /// Build the export plan for a recipe. The output path is used verbatim;
@@ -336,10 +369,12 @@ pub fn export_plan(
     input: &str,
     output: &str,
 ) -> Result<ExportPlan, PipelineError> {
-    export_plan_with_facts(recipe, input, output, &SourceFacts::default())
+    export_plan_with_facts(recipe, input, output, &[])
 }
 
-/// Build the export plan for a recipe, given facts about its source.
+/// Build the export plan for a recipe, given facts about its sources
+/// (`facts[0]` for the recipe's own source, then one per joined source;
+/// missing entries are unknown).
 ///
 /// Kept ranges (recipe schema 2) are planned two ways, never confused:
 ///
@@ -355,9 +390,14 @@ pub fn export_plan_with_facts(
     recipe: &Recipe,
     input: &str,
     output: &str,
-    facts: &SourceFacts,
+    facts: &[SourceFacts],
 ) -> Result<ExportPlan, PipelineError> {
     recipe.validate()?;
+    if !recipe.join.is_empty() {
+        return join_plan(recipe, input, output, facts);
+    }
+    let unknown = SourceFacts::default();
+    let facts = facts.first().unwrap_or(&unknown);
     let chain = if recipe.operations.is_empty() {
         String::new()
     } else {
@@ -440,6 +480,147 @@ pub fn export_plan_with_facts(
         args,
         stabilization,
         notices,
+        concat_list: None,
+    })
+}
+
+/// The plan joining the recipe's source and its joined sources, in order.
+///
+/// Every source must have the same picture size, and either all have
+/// audio or none do: conforming them (scaling, padding, inventing
+/// silence) would change footage without a recorded decision, so it is
+/// refused with the differences named. A re-encoding intent joins in one
+/// concat filter graph and runs the restoration chain on the result; the
+/// stream-copy intent uses the concat demuxer, which also needs matching
+/// codecs.
+fn join_plan(
+    recipe: &Recipe,
+    input: &str,
+    output: &str,
+    facts: &[SourceFacts],
+) -> Result<ExportPlan, PipelineError> {
+    if recipe.needs_stabilization_pass() {
+        return Err(PipelineError::StabilizationWithJoin);
+    }
+    let mut paths: Vec<String> = vec![input.to_string()];
+    paths.extend(recipe.join.iter().map(|p| p.source_name.clone()));
+    let n = paths.len();
+    let mut sizes = Vec::with_capacity(n);
+    let mut audio = Vec::with_capacity(n);
+    for i in 0..n {
+        let f = facts.get(i).ok_or(PipelineError::JoinFactsUnknown(i + 1))?;
+        sizes.push(f.size.ok_or(PipelineError::JoinFactsUnknown(i + 1))?);
+        audio.push(f.has_audio.ok_or(PipelineError::JoinFactsUnknown(i + 1))?);
+    }
+    let describe = |values: Vec<String>| {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| format!("source {} {v}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if sizes.iter().any(|s| *s != sizes[0]) {
+        return Err(PipelineError::JoinMismatch(format!(
+            "picture sizes differ ({}); joining them would need scaling or padding, which is not done silently",
+            describe(sizes.iter().map(|(w, h)| format!("{w}x{h}")).collect())
+        )));
+    }
+    if audio.iter().any(|a| *a != audio[0]) {
+        return Err(PipelineError::JoinMismatch(format!(
+            "some sources have audio and some do not ({}); filling the gaps with silence is not done silently",
+            describe(audio.iter().map(|a| if *a { "has audio".to_string() } else { "has no audio".to_string() }).collect())
+        )));
+    }
+    let has_audio = audio[0];
+    let chain = if recipe.operations.is_empty() {
+        String::new()
+    } else {
+        filter_chain(recipe)?
+    };
+    let mut notices = Vec::new();
+    let mut args: Vec<String> = vec!["ffmpeg".to_string(), "-hide_banner".to_string()];
+    let mut concat_list = None;
+
+    if recipe.export_preset == ExportPreset::StreamCopy {
+        let codecs =
+            |pick: fn(&SourceFacts) -> Option<String>| -> Result<Vec<String>, PipelineError> {
+                (0..n)
+                    .map(|i| pick(&facts[i]).ok_or(PipelineError::JoinFactsUnknown(i + 1)))
+                    .collect()
+            };
+        let video = codecs(|f| f.video_codec.clone())?;
+        if video.iter().any(|c| *c != video[0]) {
+            return Err(PipelineError::JoinMismatch(format!(
+                "video codecs differ ({}); a lossless join copies streams and needs one codec, so choose a re-encoding intent",
+                describe(video)
+            )));
+        }
+        if has_audio {
+            let audio_codecs = codecs(|f| f.audio_codec.clone())?;
+            if audio_codecs.iter().any(|c| *c != audio_codecs[0]) {
+                return Err(PipelineError::JoinMismatch(format!(
+                    "audio codecs differ ({}); a lossless join copies streams and needs one codec, so choose a re-encoding intent",
+                    describe(audio_codecs)
+                )));
+            }
+        }
+        let list_path = format!("{output}.concat.txt");
+        args.extend(
+            ["-f", "concat", "-safe", "0", "-i", list_path.as_str()]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        notices.push(format!(
+            "lossless join: {n} sources are copied in order without re-encoding; the concat list {list_path} is written before the run and removed after it"
+        ));
+        concat_list = Some(ConcatList {
+            path: list_path,
+            entries: paths.clone(),
+        });
+    } else {
+        for path in &paths {
+            args.extend(["-i".to_string(), path.clone()]);
+        }
+        let mut graph = String::new();
+        for i in 0..n {
+            graph.push_str(&format!("[{i}:v:0]"));
+            if has_audio {
+                graph.push_str(&format!("[{i}:a:0]"));
+            }
+        }
+        let (a, outs) = if has_audio {
+            (1, "[vcat][aout]")
+        } else {
+            (0, "[vcat]")
+        };
+        graph.push_str(&format!("concat=n={n}:v=1:a={a}{outs};"));
+        if chain.is_empty() {
+            graph.push_str("[vcat]null[vout]");
+        } else {
+            graph.push_str(&format!("[vcat]{chain}[vout]"));
+        }
+        args.extend(["-filter_complex".to_string(), graph]);
+        args.extend(["-map".to_string(), "[vout]".to_string()]);
+        if has_audio {
+            args.extend(["-map".to_string(), "[aout]".to_string()]);
+        }
+        notices.push(format!(
+            "{n} sources are joined in order; only the first video and first audio stream of each are kept"
+        ));
+    }
+    args.extend(preset_args(recipe.export_preset));
+    args.push("-y".to_string());
+    args.push(output.to_string());
+    Ok(ExportPlan {
+        input: input.to_string(),
+        output: output.to_string(),
+        preset: recipe.export_preset,
+        filter_chain: chain,
+        args,
+        stabilization: None,
+        notices,
+        concat_list,
     })
 }
 
@@ -539,6 +720,7 @@ pub fn preview_plan(
         args,
         stabilization: None,
         notices: Vec::new(),
+        concat_list: None,
     })
 }
 
@@ -596,9 +778,10 @@ mod tests {
             export_plan(&recipe, "in.mkv", "out.mkv"),
             Err(PipelineError::AudioUnknown)
         ));
-        let with_audio = SourceFacts {
+        let with_audio = [SourceFacts {
             has_audio: Some(true),
-        };
+            ..Default::default()
+        }];
         let plan = export_plan_with_facts(&recipe, "in.mkv", "out.mkv", &with_audio).expect("plan");
         let graph = plan.args[plan
             .args
@@ -618,9 +801,10 @@ mod tests {
         );
         assert!(args(&plan).contains("-map [vout] -map [aout] -c:v ffv1"));
 
-        let silent = SourceFacts {
+        let silent = [SourceFacts {
             has_audio: Some(false),
-        };
+            ..Default::default()
+        }];
         let plan = export_plan_with_facts(
             &Recipe::new("in.mkv", ExportPreset::Access)
                 .keep_range(1.0, Some(2.0))
@@ -658,6 +842,108 @@ mod tests {
         assert!(matches!(
             export_plan(&several, "in.mov", "out.mkv"),
             Err(PipelineError::LosslessMultiRange)
+        ));
+    }
+
+    fn facts(w: u32, h: u32, audio: Option<&str>, video: &str) -> SourceFacts {
+        SourceFacts {
+            has_audio: Some(audio.is_some()),
+            size: Some((w, h)),
+            video_codec: Some(video.to_string()),
+            audio_codec: audio.map(String::from),
+        }
+    }
+
+    #[test]
+    fn golden_join_reencodes_in_one_graph() {
+        let recipe = deinterlace(DeinterlaceEngine::Bwdif, OutputRate::SendFrame, false)
+            .join_source("b.avi", None)
+            .join_source("c.mov", None);
+        let f = [
+            facts(720, 576, Some("pcm_s16le"), "dvvideo"),
+            facts(720, 576, Some("mp3"), "mpeg4"),
+            facts(720, 576, Some("aac"), "h264"),
+        ];
+        let plan = export_plan_with_facts(&recipe, "a.mkv", "out.mkv", &f).expect("plan");
+        assert_eq!(
+            args(&plan),
+            "ffmpeg -hide_banner -i a.mkv -i b.avi -i c.mov -filter_complex \
+             [0:v:0][0:a:0][1:v:0][1:a:0][2:v:0][2:a:0]concat=n=3:v=1:a=1[vcat][aout];\
+             [vcat]bwdif=mode=send_frame:parity=tff:deint=all[vout] \
+             -map [vout] -map [aout] -c:v ffv1 -level 3 -coder 1 -context 1 -g 1 -slices 24 \
+             -slicecrc 1 -c:a flac -y out.mkv"
+        );
+        assert!(plan.concat_list.is_none());
+        assert!(plan.notices[0].contains("3 sources are joined"));
+    }
+
+    #[test]
+    fn golden_join_lossless_uses_a_concat_list() {
+        let recipe = Recipe::new("a.mp4", ExportPreset::StreamCopy).join_source("b.mp4", None);
+        let f = [
+            facts(1920, 1080, Some("aac"), "h264"),
+            facts(1920, 1080, Some("aac"), "h264"),
+        ];
+        let plan = export_plan_with_facts(&recipe, "a.mp4", "out.mkv", &f).expect("plan");
+        assert_eq!(
+            args(&plan),
+            "ffmpeg -hide_banner -f concat -safe 0 -i out.mkv.concat.txt -map 0 -c copy -y out.mkv"
+        );
+        let list = plan.concat_list.expect("list");
+        assert_eq!(list.path, "out.mkv.concat.txt");
+        assert_eq!(list.entries, vec!["a.mp4", "b.mp4"]);
+        assert_eq!(
+            concat_list_text(&["/x/it's.mp4".to_string(), "/x/b.mp4".to_string()]),
+            "file '/x/it'\\''s.mp4'\nfile '/x/b.mp4'\n"
+        );
+    }
+
+    #[test]
+    fn joins_that_would_change_footage_silently_are_refused() {
+        let recipe = Recipe::new("a.mp4", ExportPreset::Access).join_source("b.mp4", None);
+        let err = |f: &[SourceFacts]| match export_plan_with_facts(&recipe, "a.mp4", "o.mp4", f) {
+            Err(PipelineError::JoinMismatch(why)) => why,
+            other => panic!("expected JoinMismatch, got {other:?}"),
+        };
+        let why = err(&[
+            facts(720, 576, Some("aac"), "h264"),
+            facts(1920, 1080, Some("aac"), "h264"),
+        ]);
+        assert!(
+            why.contains("source 1 720x576, source 2 1920x1080"),
+            "{why}"
+        );
+        let why = err(&[
+            facts(720, 576, Some("aac"), "h264"),
+            facts(720, 576, None, "h264"),
+        ]);
+        assert!(why.contains("source 2 has no audio"), "{why}");
+        assert!(matches!(
+            export_plan_with_facts(&recipe, "a.mp4", "o.mp4", &[facts(720, 576, None, "h264")]),
+            Err(PipelineError::JoinFactsUnknown(2))
+        ));
+
+        let copy = Recipe::new("a.mp4", ExportPreset::StreamCopy).join_source("b.avi", None);
+        let lossless = |f: &[SourceFacts]| export_plan_with_facts(&copy, "a.mp4", "o.mkv", f);
+        assert!(matches!(
+            lossless(&[facts(720, 576, None, "h264"), facts(720, 576, None, "mpeg4")]),
+            Err(PipelineError::JoinMismatch(why)) if why.contains("video codecs differ")
+        ));
+        assert!(matches!(
+            lossless(&[facts(720, 576, Some("aac"), "h264"), facts(720, 576, Some("mp3"), "h264")]),
+            Err(PipelineError::JoinMismatch(why)) if why.contains("audio codecs differ")
+        ));
+
+        let stabilized = Recipe::new("a.mp4", ExportPreset::Access)
+            .push(Operation::Stabilize {
+                smoothing: 10,
+                zoom_percent: 0.0,
+                tripod: false,
+            })
+            .join_source("b.mp4", None);
+        assert!(matches!(
+            export_plan_with_facts(&stabilized, "a.mp4", "o.mp4", &[]),
+            Err(PipelineError::StabilizationWithJoin)
         ));
     }
 

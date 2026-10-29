@@ -40,6 +40,10 @@ pub enum RecipeError {
     BadRange { index: usize, detail: String },
     #[error("a stream-copy export copies the streams untouched, so it cannot apply operations; remove them or choose an intent that re-encodes")]
     StreamCopyWithOperations,
+    #[error("joined source {index} is invalid: {detail}")]
+    BadJoin { index: usize, detail: String },
+    #[error("kept ranges and joined sources cannot be combined yet; cut each source first, then join the cuts")]
+    JoinWithCut,
     #[error("source SHA-256 is not a 64-character hex string: {0}")]
     BadSourceHash(String),
     #[error("denoise {field} strength {value} is outside the allowed range 0.0..=20.0")]
@@ -327,6 +331,29 @@ pub struct Recipe {
     /// between them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keep: Vec<KeepRange>,
+    /// Further sources appended after this one, in order, to make one
+    /// output (schema 2). Each is pinned by its own hash when known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub join: Vec<JoinPart>,
+}
+
+/// A source joined after the recipe's own source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinPart {
+    /// Path of the source, as for [`Recipe::source_name`].
+    pub source_name: String,
+    /// SHA-256 of the source when the recipe was written.
+    #[serde(default)]
+    pub source_sha256: Option<String>,
+}
+
+impl JoinPart {
+    pub fn new(source_name: impl Into<String>, source_sha256: Option<String>) -> Self {
+        JoinPart {
+            source_name: source_name.into(),
+            source_sha256,
+        }
+    }
 }
 
 /// A range of the source to keep, in seconds from its start.
@@ -396,7 +423,22 @@ impl Recipe {
             export_preset,
             notes: String::new(),
             keep: Vec::new(),
+            join: Vec::new(),
         }
+    }
+
+    /// Append a source to join after this one (see [`Recipe::join`]).
+    pub fn join_source(mut self, source_name: impl Into<String>, sha256: Option<String>) -> Self {
+        self.join.push(JoinPart::new(source_name, sha256));
+        self
+    }
+
+    /// Every source of the recipe in output order: its own, then the
+    /// joined ones.
+    pub fn source_names(&self) -> Vec<&str> {
+        std::iter::once(self.source_name.as_str())
+            .chain(self.join.iter().map(|p| p.source_name.as_str()))
+            .collect()
     }
 
     /// Keep a range of the source (see [`Recipe::keep`]).
@@ -407,7 +449,9 @@ impl Recipe {
 
     /// True when the recipe uses a field only schema 2 can carry.
     pub fn uses_schema2(&self) -> bool {
-        !self.keep.is_empty() || self.export_preset == ExportPreset::StreamCopy
+        !self.keep.is_empty()
+            || !self.join.is_empty()
+            || self.export_preset == ExportPreset::StreamCopy
     }
 
     pub fn push(mut self, op: Operation) -> Self {
@@ -427,6 +471,9 @@ impl Recipe {
             if self.export_preset == ExportPreset::StreamCopy {
                 return Err(RecipeError::NeedsSchema2("the stream-copy intent"));
             }
+            if !self.join.is_empty() {
+                return Err(RecipeError::NeedsSchema2("joined sources"));
+            }
         }
         if self.source_name.trim().is_empty() {
             return Err(RecipeError::EmptySourceName);
@@ -440,6 +487,7 @@ impl Recipe {
         // do, so it counts as an explicit action.
         if self.operations.is_empty()
             && self.keep.is_empty()
+            && self.join.is_empty()
             && self.export_preset != ExportPreset::StreamCopy
         {
             return Err(RecipeError::EmptyOperations);
@@ -450,7 +498,32 @@ impl Recipe {
         for op in &self.operations {
             op.validate()?;
         }
-        self.validate_keep()
+        self.validate_keep()?;
+        self.validate_join()
+    }
+
+    fn validate_join(&self) -> Result<(), RecipeError> {
+        if !self.join.is_empty() && !self.keep.is_empty() {
+            return Err(RecipeError::JoinWithCut);
+        }
+        for (i, part) in self.join.iter().enumerate() {
+            let index = i + 1;
+            if part.source_name.trim().is_empty() {
+                return Err(RecipeError::BadJoin {
+                    index,
+                    detail: "the source name is empty".to_string(),
+                });
+            }
+            if let Some(hash) = &part.source_sha256 {
+                if !is_sha256_hex(hash) {
+                    return Err(RecipeError::BadJoin {
+                        index,
+                        detail: format!("SHA-256 is not a 64-character hex string: {hash}"),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Kept ranges must be finite, start at or after 0, have positive
@@ -684,6 +757,48 @@ mod tests {
                 .is_ok(),
             "touching ranges are allowed"
         );
+    }
+
+    #[test]
+    fn joined_sources_validate_and_round_trip() {
+        let hash = "a".repeat(64);
+        let recipe = Recipe::new("one.mkv", ExportPreset::Access)
+            .join_source("two.mkv", Some(hash.clone()))
+            .join_source("three.mkv", None);
+        assert!(
+            recipe.validate().is_ok(),
+            "a join alone is an explicit action"
+        );
+        assert!(recipe.uses_schema2());
+        assert_eq!(
+            recipe.source_names(),
+            vec!["one.mkv", "two.mkv", "three.mkv"]
+        );
+        let back = Recipe::from_json(&recipe.to_json().unwrap()).unwrap();
+        assert_eq!(back, recipe);
+
+        let mut old = recipe.clone();
+        old.schema_version = 1;
+        assert_eq!(
+            old.validate(),
+            Err(RecipeError::NeedsSchema2("joined sources"))
+        );
+        assert_eq!(
+            recipe.clone().keep_range(0.0, Some(1.0)).validate(),
+            Err(RecipeError::JoinWithCut)
+        );
+        assert!(matches!(
+            Recipe::new("one.mkv", ExportPreset::Access)
+                .join_source(" ", None)
+                .validate(),
+            Err(RecipeError::BadJoin { index: 1, .. })
+        ));
+        assert!(matches!(
+            Recipe::new("one.mkv", ExportPreset::Access)
+                .join_source("two.mkv", Some("xyz".into()))
+                .validate(),
+            Err(RecipeError::BadJoin { index: 1, .. })
+        ));
     }
 
     #[test]

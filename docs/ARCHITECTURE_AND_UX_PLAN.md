@@ -174,9 +174,15 @@ order, with every parameter, re-runnable, and proved.
     frames' motion; stabilize first, then cut the stabilized output.
 - **Join and merge.** Several sources (AVI, MP4, MOV, MKV, ASF and
   anything else FFmpeg demuxes) into one output, in order. Every source
-  is pinned by its own SHA-256 in the recipe. Sources whose streams match
-  can be joined losslessly; otherwise the join re-encodes, and the plan
-  shows which.
+  is pinned by its own SHA-256 in the recipe, recorded in the export log,
+  and re-checked by verify. The operator chooses the mode: lossless (the
+  concat demuxer; every source must share codecs and picture size, or the
+  plan refuses and names the differences) or re-encoded (one concat
+  filter graph, which can carry the restoration chain). Sources with
+  different picture sizes, or with audio in only some, are refused in
+  both modes until conforming (scale, pad, generated silence) exists as
+  an explicit, recorded operation. Joins don't combine with kept ranges
+  or stabilization yet: cut or stabilize first, then join.
 - **Audio tracks.** Add, remove, or replace tracks; per-track gain and
   simple mixing; audio codec choice. Loudness is measured before and
   after, never asserted.
@@ -242,7 +248,7 @@ rd-pipeline   Filter-graph / VapourSynth-script planning, two-pass
 rd-ui         Shell state model (queue / viewer / chain / jobs); no
               framework code yet — see the GUI decision below
 reeldeck      CLI binary: inspect | plan | export | preview | verify |
-              rerun | batch | cut | split | hash | version
+              rerun | batch | cut | split | join | hash | version
 ```
 
 - **Engine:** FFmpeg (a pinned build; note that the stabilization library

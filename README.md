@@ -96,7 +96,7 @@ leaves the disk.
 | `crates/rd-pipeline` | Planning: recipe → filter strings, two-pass stabilization plan, export argument vectors. Plans only; never executes. |
 | `crates/rd-run` | Execution: runs plans with FFmpeg (fixity gate, never-overwrite, measured progress, cancellation) and writes the recipe + export-log proof beside every output; runs resumable batches. |
 | `crates/rd-ui` | Interface state model and design system: workflow stages and gates, per-source chain state with undo/redo, chain editing and guards, timeline lanes/marks, formatting, preferences, commands, pre-export checks — plus a framework-neutral shell prototype. |
-| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `batch`, `cut`, `split`, `hash`, `version`. |
+| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `batch`, `cut`, `split`, `join`, `hash`, `version`. |
 
 ## Building from source
 
@@ -259,6 +259,27 @@ cargo run -p reeldeck -- cut tape.mkv --keep 0-1:00 --keep 2:30- --preset preser
 cargo run -p reeldeck -- cut tape.mkv --keep 10:00-25:00 --lossless
 # Three parts in tape.split/, each with its own proof, run as a batch
 cargo run -p reeldeck -- split tape.mkv --at 20:00 --at 40:00 --lossless
+```
+
+`join` puts several files together in order — any formats FFmpeg reads
+(MP4, AVI, MOV, MKV, ASF, …). Each source is pinned by its own SHA-256,
+the export log records every one, and `verify` re-checks them all.
+Again you choose the mode:
+
+- `--lossless` copies the streams. Every file must share its video
+  codec, audio codec and picture size; if not, the join is refused and
+  the differences are named.
+- `--preset <name>` re-encodes, so mixed formats and codecs join fine.
+
+Files with different picture sizes, or with audio in only some of them,
+are refused in both modes: scaling, padding or inventing silence would
+change the footage without a recorded decision. When a container's own
+timing is uneven, the re-encode may duplicate a frame or two to keep the
+rate steady; the export log counts them.
+
+```sh
+cargo run -p reeldeck -- join reel1.mp4 reel2.mp4 --lossless
+cargo run -p reeldeck -- join tape.avi clip.mov extra.asf --preset mezzanine --out joined.mov
 ```
 
 Recipes that use these edit fields are written as schema 2; schema-1

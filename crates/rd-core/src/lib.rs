@@ -22,9 +22,10 @@ pub use batch::{
     BatchManifest, BatchState, EntryState, EntryStatus, BATCH_SCHEMA_VERSION,
 };
 pub use hash::{is_sha256_hex, sha256_digest, sha256_file, sha256_hex, Sha256};
-pub use log::ExportLog;
+pub use log::{ExportLog, SourceRecord};
 pub use recipe::{
-    parse_time, CropRect, DeinterlaceEngine, DenoiseEngine, ExportPreset, FieldOrder, KeepRange,
-    Operation, OutputRate, Recipe, RecipeError, MIN_RECIPE_SCHEMA_VERSION, RECIPE_SCHEMA_VERSION,
+    parse_time, CropRect, DeinterlaceEngine, DenoiseEngine, ExportPreset, FieldOrder, JoinPart,
+    KeepRange, Operation, OutputRate, Recipe, RecipeError, MIN_RECIPE_SCHEMA_VERSION,
+    RECIPE_SCHEMA_VERSION,
 };
-pub use verify::{verify_export, Check, CheckStatus, VerificationReport};
+pub use verify::{verify_export, verify_joined_export, Check, CheckStatus, VerificationReport};

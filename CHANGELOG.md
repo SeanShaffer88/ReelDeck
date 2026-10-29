@@ -39,6 +39,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Joining files. Recipe schema 2 adds `join` (further sources in order,
+  each pinned by SHA-256); the export log records every joined source's
+  hash (`joined_sources`), and verify gains a sixth check,
+  `joined_sources`, that re-hashes them (`verify_joined_export`). The
+  planner joins in one concat filter graph for re-encoding intents and
+  with the concat demuxer for stream copy (the executor writes the list
+  file with absolute paths before the run and removes it after). Plans
+  need per-source facts (`SourceFacts`: audio, picture size, codecs,
+  from `rd_run::source_facts`), and refuse — naming the differences —
+  when picture sizes differ, when only some sources have audio, or, for
+  a lossless join, when codecs differ. Joins combined with kept ranges
+  or stabilization are refused for now. A joined source whose hash no
+  longer matches its pin stops the run. New CLI command
+  `reeldeck join <file> <file> … (--lossless | --preset <name>)`;
+  `reeldeck plan` and `reeldeck verify` handle joined recipes. No new
+  dependency.
+
 - Cutting, trimming and splitting (first v0.4 slice). Recipe schema 2
   adds `keep` ranges (trim = one range; several remove the parts between
   them; an open end keeps to the end of the source) and the stream-copy

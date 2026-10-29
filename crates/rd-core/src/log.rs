@@ -59,6 +59,17 @@ pub struct ExportLog {
     #[serde(default)]
     pub notes: String,
     pub success: bool,
+    /// Sources joined after `source_name`, in order, each with the
+    /// SHA-256 computed during the run (recipe schema 2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joined_sources: Vec<SourceRecord>,
+}
+
+/// A source and its SHA-256 as hashed during a run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceRecord {
+    pub name: String,
+    pub sha256: String,
 }
 
 impl ExportLog {
@@ -90,6 +101,7 @@ impl ExportLog {
             warnings: Vec::new(),
             notes: String::new(),
             success: false,
+            joined_sources: Vec::new(),
         }
     }
 

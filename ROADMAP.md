@@ -56,8 +56,10 @@ engine, under the same proof rules (plan §3.7–§3.10).
   stated before the run and recorded in the log): `reeldeck cut`,
   `reeldeck split`. Several ranges in one lossless file are not yet
   supported
-- Join / merge several sources (AVI, MP4, MOV, MKV, ASF, …) into one
-  output, each source pinned by hash; lossless when streams match
+- [x] Join / merge several sources (AVI, MP4, MOV, MKV, ASF, …) into one
+  output, each source pinned by hash and re-verified; lossless when
+  codecs and picture size match (`reeldeck join`). Conforming mismatched
+  sizes or missing audio is not done yet — those joins are refused
 - Format conversion between containers and codecs, with resolution,
   frame rate and bitrate/quality settings; incompatible combinations
   refused with the reason

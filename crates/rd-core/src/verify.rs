@@ -99,14 +99,92 @@ pub fn verify_export(
     source_sha256: Option<&str>,
     output_sha256: Option<&str>,
 ) -> VerificationReport {
-    VerificationReport {
-        checks: vec![
-            check_run_succeeded(log),
-            check_output_hash(log, output_sha256),
-            check_source_hash(log, recipe, source_sha256),
-            check_preset_match(log, recipe),
-            check_schema_match(log, recipe),
-        ],
+    verify_joined_export(log, recipe, source_sha256, output_sha256, &[])
+}
+
+/// [`verify_export`] for an export that may have joined sources:
+/// `joined_sha256[i]` is the hash of joined source *i* on disk now
+/// (`None` when it was not found). When the recipe or the log names
+/// joined sources, a sixth check follows:
+///
+/// 6. `joined_sources` — the recipe and log agree on the joined sources,
+///    each recorded hash matches the recipe's pin, and each file on disk
+///    still hashes to it. A missing file makes the check skip, never pass.
+pub fn verify_joined_export(
+    log: &ExportLog,
+    recipe: &Recipe,
+    source_sha256: Option<&str>,
+    output_sha256: Option<&str>,
+    joined_sha256: &[Option<String>],
+) -> VerificationReport {
+    let mut checks = vec![
+        check_run_succeeded(log),
+        check_output_hash(log, output_sha256),
+        check_source_hash(log, recipe, source_sha256),
+        check_preset_match(log, recipe),
+        check_schema_match(log, recipe),
+    ];
+    if !recipe.join.is_empty() || !log.joined_sources.is_empty() {
+        checks.push(check_joined_sources(log, recipe, joined_sha256));
+    }
+    VerificationReport { checks }
+}
+
+fn check_joined_sources(log: &ExportLog, recipe: &Recipe, actual: &[Option<String>]) -> Check {
+    const NAME: &str = "joined_sources";
+    if recipe.join.len() != log.joined_sources.len() {
+        return Check::new(
+            NAME,
+            CheckStatus::Fail,
+            format!(
+                "the recipe joins {} sources but the export log records {}",
+                recipe.join.len(),
+                log.joined_sources.len()
+            ),
+        );
+    }
+    let mut problems = Vec::new();
+    let mut missing = Vec::new();
+    for (i, (part, record)) in recipe.join.iter().zip(&log.joined_sources).enumerate() {
+        let n = i + 1;
+        if let Some(pin) = &part.source_sha256 {
+            if !pin.eq_ignore_ascii_case(&record.sha256) {
+                problems.push(format!(
+                    "joined source {n} ({}): the recipe pins {pin} but the run hashed {}",
+                    part.source_name, record.sha256
+                ));
+                continue;
+            }
+        }
+        match actual.get(i).and_then(|h| h.as_deref()) {
+            Some(now) if now.eq_ignore_ascii_case(&record.sha256) => {}
+            Some(now) => problems.push(format!(
+                "joined source {n} ({}) now hashes to {now}, not the recorded {}",
+                part.source_name, record.sha256
+            )),
+            None => missing.push(format!("{n} ({})", part.source_name)),
+        }
+    }
+    if !problems.is_empty() {
+        Check::new(NAME, CheckStatus::Fail, problems.join("; "))
+    } else if !missing.is_empty() {
+        Check::new(
+            NAME,
+            CheckStatus::Skipped,
+            format!(
+                "joined source {} could not be found or hashed, so it was not checked",
+                missing.join(", ")
+            ),
+        )
+    } else {
+        Check::new(
+            NAME,
+            CheckStatus::Pass,
+            format!(
+                "all {} joined sources match the recipe and the export log",
+                recipe.join.len()
+            ),
+        )
     }
 }
 
@@ -415,6 +493,61 @@ mod tests {
         let report = verify_export(&fixture_log(), &recipe, Some(SRC), Some(OUT));
         assert_eq!(check(&report, "preset_match").status, CheckStatus::Fail);
         assert_eq!(report.failed(), 1);
+    }
+
+    fn joined_fixture() -> (Recipe, ExportLog) {
+        let mut recipe = fixture_recipe();
+        recipe.operations.clear();
+        recipe.export_preset = ExportPreset::PreservationMaster;
+        recipe.join.push(crate::recipe::JoinPart::new(
+            "part2.mkv",
+            Some(OTHER.to_string()),
+        ));
+        let mut log = fixture_log();
+        log.joined_sources.push(crate::log::SourceRecord {
+            name: "part2.mkv".into(),
+            sha256: OTHER.into(),
+        });
+        (recipe, log)
+    }
+
+    #[test]
+    fn joined_sources_pass_skip_and_fail() {
+        let (recipe, log) = joined_fixture();
+        let ok = verify_joined_export(&log, &recipe, Some(SRC), Some(OUT), &[Some(OTHER.into())]);
+        assert_eq!(ok.checks.len(), 6);
+        assert_eq!(check(&ok, "joined_sources").status, CheckStatus::Pass);
+
+        let gone = verify_joined_export(&log, &recipe, Some(SRC), Some(OUT), &[None]);
+        assert_eq!(check(&gone, "joined_sources").status, CheckStatus::Skipped);
+        assert!(gone.ok(), "a skip is not a failure");
+
+        let changed =
+            verify_joined_export(&log, &recipe, Some(SRC), Some(OUT), &[Some(SRC.into())]);
+        assert_eq!(check(&changed, "joined_sources").status, CheckStatus::Fail);
+
+        let mut unrecorded = log.clone();
+        unrecorded.joined_sources.clear();
+        let report = verify_joined_export(
+            &unrecorded,
+            &recipe,
+            Some(SRC),
+            Some(OUT),
+            &[Some(OTHER.into())],
+        );
+        assert_eq!(check(&report, "joined_sources").status, CheckStatus::Fail);
+
+        let mut repinned = recipe.clone();
+        repinned.join[0].source_sha256 = Some(SRC.into());
+        let report =
+            verify_joined_export(&log, &repinned, Some(SRC), Some(OUT), &[Some(OTHER.into())]);
+        assert_eq!(check(&report, "joined_sources").status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn single_source_exports_keep_five_checks() {
+        let report = verify_export(&fixture_log(), &fixture_recipe(), Some(SRC), Some(OUT));
+        assert_eq!(report.checks.len(), 5);
     }
 
     #[test]

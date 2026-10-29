@@ -27,6 +27,8 @@
 //!                                 (lossless or frame-accurate)
 //!   reeldeck split <file> --at <t> Split a file into parts, each
 //!                                 rendered with its own proof
+//!   reeldeck join <a> <b> …        Join files in order into one
+//!                                 output (lossless or re-encoded)
 //!   reeldeck hash <file>          Print the file's SHA-256
 //!   reeldeck version              Print the version
 
@@ -52,6 +54,7 @@ fn main() -> ExitCode {
         Some("batch") => cmd_batch(&args[1..]),
         Some("cut") => cmd_cut(&args[1..]),
         Some("split") => cmd_split(&args[1..]),
+        Some("join") => cmd_join(&args[1..]),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_usage();
             0
@@ -112,6 +115,12 @@ fn print_usage() {
          \x20                               Split into parts at the given times, run as a batch\n\
          \x20                               in <stem>.split/ so each part has its own proof;\n\
          \x20                               the same command again resumes an unfinished split\n\
+         \x20 reeldeck join <file> <file> [<file> …] (--lossless | --preset <name>) [--out <file>]\n\
+         \x20                               Join files in order into one NEW output, each source\n\
+         \x20                               pinned by hash. --lossless copies the streams (all\n\
+         \x20                               files must share codecs and picture size); --preset\n\
+         \x20                               re-encodes. Different picture sizes, or audio in only\n\
+         \x20                               some files, are refused rather than conformed silently\n\
          \x20 reeldeck hash <file>          Print the file's SHA-256\n\
          \x20 reeldeck version              Print the version"
     );
@@ -653,13 +662,15 @@ fn cmd_plan(args: &[String]) -> i32 {
         }
     };
     let output = derived_output_path(&recipe.source_name, recipe.export_preset);
-    // Joining several kept ranges needs to know whether there is audio;
-    // ask the source when it is reachable.
-    let mut facts = rd_pipeline::SourceFacts::default();
-    if recipe.keep.len() > 1 {
-        if let Ok(probe) = rd_analyze::probe(Path::new(&recipe.source_name)) {
-            facts.has_audio = Some(probe.streams.iter().any(|s| s.codec_type == "audio"));
-        }
+    // Joins and multi-range cuts need facts about their sources; ask
+    // the sources when they are reachable.
+    let mut facts = Vec::new();
+    if !recipe.join.is_empty() || recipe.keep.len() > 1 {
+        facts = recipe
+            .source_names()
+            .iter()
+            .map(|name| rd_run::source_facts(Path::new(name)))
+            .collect();
     }
     match rd_pipeline::export_plan_with_facts(&recipe, &recipe.source_name, &output, &facts) {
         Ok(plan) => {
@@ -1115,11 +1126,23 @@ fn cmd_verify(args: &[String]) -> i32 {
     let source_hash = source_found
         .as_ref()
         .and_then(|p| rd_core::sha256_file(p).ok());
-    let report = rd_core::verify_export(
+    // Joined sources are found the same way as the main source.
+    let joined: Vec<(Option<PathBuf>, Option<String>)> = recipe
+        .join
+        .iter()
+        .map(|part| {
+            let (found, _) = resolve_beside(&part.source_name, parent_dir(&output));
+            let hash = found.as_ref().and_then(|p| rd_core::sha256_file(p).ok());
+            (found, hash)
+        })
+        .collect();
+    let joined_hashes: Vec<Option<String>> = joined.iter().map(|(_, h)| h.clone()).collect();
+    let report = rd_core::verify_joined_export(
         &log,
         &recipe,
         source_hash.as_deref(),
         Some(output_hash.as_str()),
+        &joined_hashes,
     );
     if json {
         match serde_json::to_string_pretty(&report) {
@@ -1145,6 +1168,16 @@ fn cmd_verify(args: &[String]) -> i32 {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+        }
+        for (part, (found, hash)) in recipe.join.iter().zip(&joined) {
+            match (found, hash) {
+                (Some(p), Some(h)) => println!("Joined source: {} (sha256 {h})", p.display()),
+                (Some(p), None) => println!(
+                    "Joined source: {} (found but could not be hashed)",
+                    p.display()
+                ),
+                (None, _) => println!("Joined source: {} (not found)", part.source_name),
+            }
         }
         for c in &report.checks {
             let label = match c.status {
@@ -1759,6 +1792,105 @@ fn cmd_split(args: &[String]) -> i32 {
     }
     println!("Split manifest: {}", manifest.display());
     cmd_batch(&[manifest.display().to_string()])
+}
+
+const JOIN_USAGE: &str =
+    "reeldeck join <file> <file> [<file> …] (--lossless | --preset <preservation|mezzanine|access>) [--out <file>]";
+
+struct JoinArgs {
+    inputs: Vec<PathBuf>,
+    preset: rd_core::ExportPreset,
+    out: Option<PathBuf>,
+}
+
+fn parse_join_args(args: &[String]) -> Result<JoinArgs, u8> {
+    let fail = |msg: String| {
+        eprintln!("reeldeck join: {msg}");
+        eprintln!("usage: {JOIN_USAGE}");
+        2u8
+    };
+    let mut inputs = Vec::new();
+    let mut lossless = false;
+    let mut preset = None;
+    let mut out = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        let mut value = || {
+            i += 1;
+            args.get(i)
+                .cloned()
+                .ok_or_else(|| fail(format!("missing value for {arg}")))
+        };
+        match arg {
+            "--lossless" => lossless = true,
+            "--preset" => {
+                let v = value()?;
+                preset = Some(parse_preset_name(&v).ok_or_else(|| {
+                    fail(format!(
+                        "--preset expects preservation, mezzanine or access, got '{v}'"
+                    ))
+                })?);
+            }
+            "--out" => out = Some(PathBuf::from(value()?)),
+            flag if flag.starts_with("--") => return Err(fail(format!("unknown flag '{flag}'"))),
+            _ => inputs.push(PathBuf::from(arg)),
+        }
+        i += 1;
+    }
+    if inputs.len() < 2 {
+        return Err(fail(
+            "name at least two files to join, in order".to_string(),
+        ));
+    }
+    let preset = match (lossless, preset) {
+        (true, None) => rd_core::ExportPreset::StreamCopy,
+        (false, Some(p)) => p,
+        (true, Some(_)) => {
+            return Err(fail(
+                "choose one: --lossless copies the streams, --preset re-encodes".to_string(),
+            ))
+        }
+        (false, None) => {
+            return Err(fail(
+                "choose how to join: --lossless (streams copied untouched; every file must share codecs and picture size) or --preset <name> (re-encoded)".to_string(),
+            ))
+        }
+    };
+    Ok(JoinArgs {
+        inputs,
+        preset,
+        out,
+    })
+}
+
+fn cmd_join(args: &[String]) -> i32 {
+    let parsed = match parse_join_args(args) {
+        Ok(p) => p,
+        Err(c) => return c as i32,
+    };
+    let mut hashes = Vec::with_capacity(parsed.inputs.len());
+    for input in &parsed.inputs {
+        match hash_source("join", input) {
+            Ok(h) => hashes.push(h),
+            Err(c) => return c,
+        }
+    }
+    let first = &parsed.inputs[0];
+    let mut recipe = rd_core::Recipe::new(first.display().to_string(), parsed.preset);
+    recipe.source_sha256 = Some(hashes[0].clone());
+    for (input, hash) in parsed.inputs.iter().zip(&hashes).skip(1) {
+        recipe = recipe.join_source(input.display().to_string(), Some(hash.clone()));
+    }
+    recipe.notes = "written by reeldeck join".to_string();
+    if let Err(e) = recipe.validate() {
+        eprintln!("reeldeck join: {e}");
+        return 2;
+    }
+    let output = parsed
+        .out
+        .unwrap_or_else(|| PathBuf::from(edited_output_path(first, "joined", None, parsed.preset)));
+    execute_run("join", &recipe, first, &output, None)
 }
 
 const BATCH_USAGE: &str = "reeldeck batch <manifest.json> [--keep-going] [--status]";
@@ -2411,6 +2543,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(split.points, vec![5.0, 60.0]);
+    }
+
+    #[test]
+    fn join_args_need_two_files_and_a_mode() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let ok =
+            parse_join_args(&args(&["a.mp4", "b.avi", "c.mov", "--preset", "mezzanine"])).unwrap();
+        assert_eq!(ok.inputs.len(), 3);
+        assert_eq!(ok.preset, rd_core::ExportPreset::Mezzanine);
+        assert_eq!(
+            parse_join_args(&args(&["a.mp4", "b.mp4", "--lossless"]))
+                .unwrap()
+                .preset,
+            rd_core::ExportPreset::StreamCopy
+        );
+        assert_eq!(
+            parse_join_args(&args(&["a.mp4", "--lossless"])).err(),
+            Some(2)
+        );
+        assert_eq!(parse_join_args(&args(&["a.mp4", "b.mp4"])).err(), Some(2));
+        assert_eq!(
+            parse_join_args(&args(&["a.mp4", "b.mp4", "--keep", "1-2"])).err(),
+            Some(2)
+        );
     }
 
     #[test]

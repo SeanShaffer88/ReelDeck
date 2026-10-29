@@ -203,6 +203,13 @@ pub enum RunError {
     OutputExists(PathBuf),
     #[error("source hash mismatch: the recipe expects SHA-256 {expected} but the input hashes to {actual}; refusing to render a different source than the recipe describes")]
     SourceHashMismatch { expected: String, actual: String },
+    #[error("joined source {index} ({path}) hash mismatch: the recipe expects SHA-256 {expected} but the file hashes to {actual}; refusing to join a different source than the recipe describes")]
+    JoinedSourceHashMismatch {
+        index: usize,
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
     #[error("could not plan the export: {0}")]
     PlanFailed(#[from] PipelineError),
     #[error("could not start ffmpeg: {0}")]
@@ -374,6 +381,36 @@ struct RunContext {
     started_at: String,
     ffmpeg_version: Option<String>,
     executed: Vec<String>,
+    joined: Vec<rd_core::SourceRecord>,
+}
+
+/// Removes a file the run created for itself (a concat list) when the
+/// run ends, however it ends.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// The facts a join or multi-range plan needs about one source, from
+/// ffprobe. ffprobe is used for every source (rather than the faster
+/// header probe tried first elsewhere) so codec names compare like for
+/// like. A source that cannot be probed yields unknown facts, and a plan
+/// that needs them refuses.
+pub fn source_facts(path: &Path) -> rd_pipeline::SourceFacts {
+    let Ok(probe) = rd_analyze::probe_ffprobe(path) else {
+        return rd_pipeline::SourceFacts::default();
+    };
+    let video = probe.first_video();
+    let audio = probe.streams.iter().find(|s| s.codec_type == "audio");
+    rd_pipeline::SourceFacts {
+        has_audio: Some(audio.is_some()),
+        size: video.and_then(|v| Some((v.width?, v.height?))),
+        video_codec: video.map(|v| v.codec_name.clone()),
+        audio_codec: audio.map(|a| a.codec_name.clone()),
+    }
 }
 
 impl RunContext {
@@ -389,6 +426,7 @@ impl RunContext {
         );
         log.ffmpeg_version = self.ffmpeg_version.clone();
         log.notes = self.recipe.notes.clone();
+        log.joined_sources = self.joined.clone();
         log
     }
 
@@ -430,11 +468,17 @@ pub fn run_export(
     opts: RunOptions,
 ) -> Result<RunReport, RunError> {
     let stream_copy = recipe.export_preset == rd_core::ExportPreset::StreamCopy;
-    let mut facts = rd_pipeline::SourceFacts::default();
-    if recipe.keep.len() > 1 && !stream_copy && input.exists() {
-        facts.has_audio = rd_analyze::probe(input)
-            .ok()
-            .map(|probe| probe.streams.iter().any(|s| s.codec_type == "audio"));
+    let mut facts = Vec::new();
+    if !recipe.join.is_empty() {
+        facts.push(source_facts(input));
+        facts.extend(
+            recipe
+                .join
+                .iter()
+                .map(|part| source_facts(Path::new(&part.source_name))),
+        );
+    } else if recipe.keep.len() > 1 && !stream_copy && input.exists() {
+        facts.push(source_facts(input));
     }
     let plan = rd_pipeline::export_plan_with_facts(
         recipe,
@@ -529,13 +573,61 @@ fn run_plan_noted(
             });
         }
     }
-    for path in [output, &recipe_path, &log_path] {
+    // Every joined source exists and is the file the recipe pinned.
+    let mut joined = Vec::with_capacity(recipe.join.len());
+    for (i, part) in recipe.join.iter().enumerate() {
+        let path = Path::new(&part.source_name);
+        if !path.exists() {
+            return Err(RunError::InputMissing(path.to_path_buf()));
+        }
+        let actual = sha256_file(path)?;
+        if let Some(expected) = &part.source_sha256 {
+            if !expected.eq_ignore_ascii_case(&actual) {
+                return Err(RunError::JoinedSourceHashMismatch {
+                    index: i + 1,
+                    path: path.to_path_buf(),
+                    expected: expected.clone(),
+                    actual,
+                });
+            }
+        }
+        joined.push(rd_core::SourceRecord {
+            name: part.source_name.clone(),
+            sha256: actual,
+        });
+    }
+    let list_path = plan.concat_list.as_ref().map(|l| PathBuf::from(&l.path));
+    for path in [
+        Some(output),
+        Some(recipe_path.as_path()),
+        Some(log_path.as_path()),
+        list_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
         if path.exists() {
             return Err(RunError::OutputExists(path.to_path_buf()));
         }
     }
     if !ffmpeg_available() {
         return Err(RunError::ToolUnavailable("ffmpeg".to_string()));
+    }
+
+    // A lossless join reads its sources from a list file, written now
+    // with absolute paths (the demuxer resolves relative ones against the
+    // list's folder) and removed when the run ends.
+    let mut _list_guard = None;
+    if let Some(list) = &plan.concat_list {
+        let mut entries = Vec::with_capacity(list.entries.len());
+        for entry in &list.entries {
+            entries.push(std::fs::canonicalize(entry)?.display().to_string());
+        }
+        write_new_file(
+            Path::new(&list.path),
+            &rd_pipeline::concat_list_text(&entries),
+        )?;
+        _list_guard = Some(RemoveOnDrop(PathBuf::from(&list.path)));
     }
 
     let ctx = RunContext {
@@ -548,6 +640,7 @@ fn run_plan_noted(
         started_at,
         ffmpeg_version: ffmpeg_version(),
         executed: executed_args(&plan.args),
+        joined,
     };
 
     // -- Stabilization pass 1 ----------------------------------------
