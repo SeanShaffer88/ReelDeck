@@ -219,6 +219,11 @@ at the first failure. Running the same command again resumes there:
 - if the manifest or any recipe changed since the batch started, the
   resume refuses rather than mixing two batches in one record.
 
+Progress lines show a percentage when the runner can state the frame
+total up front (the input's probed frame count, doubled when the chain
+deinterlaces one frame per field), and the bare frame count when it
+cannot.
+
 ```sh
 cargo run -p reeldeck -- batch batch.json
 # Render the remaining entries even after one fails

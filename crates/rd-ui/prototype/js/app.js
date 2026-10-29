@@ -714,14 +714,19 @@
     var clip = D.clips.find(function (c) { return c.id === entry.sourceId; });
     var attempt = entry.attempts + 1;
     var output = batchOutputName(clip, attempt);
+    // As rd_run::batch::probed_frame_total states it: probed frames,
+    // adjusted for the chain's output rate; null when it cannot be stated.
+    var chain = entry.sourceId === state.selectedId ? state.chain : (state.chains[entry.sourceId] || []);
+    var total = M.expectedOutputFrames(chain, Math.round(clip.duration * f.fps(clip.rate)));
+    // The simulated engine still needs a length to play out.
+    var simFrames = total == null ? Math.round(clip.duration * f.fps(clip.rate)) : total;
     M.applyBatchEvent(state, {
-      type: "started", index: k + 1, attempt: attempt, output: output,
+      type: "started", index: k + 1, attempt: attempt, output: output, totalFrames: total,
       sub: "Simulated in this prototype · attempt " + attempt + " · " + basename(output)
     });
     renderBatchViews();
     announce("Batch: rendering " + clip.name + ".");
     var fail = batchSim.failOnce === entry.sourceId && !batchSim.failed[entry.sourceId];
-    var total = Math.round(clip.duration * f.fps(clip.rate));
     var started = Date.now();
     var duration = 2400;
     var tick = setInterval(function () {
@@ -736,10 +741,10 @@
         return;
       }
       var t = Math.min(1, (Date.now() - started) / duration);
-      var frames = Math.round((1 - Math.pow(1 - t, 1.8)) * total);
+      var frames = Math.round((1 - Math.pow(1 - t, 1.8)) * simFrames);
       M.applyBatchEvent(state, {
         type: "progress", index: k + 1,
-        progress: { frame: frames, fps: Math.round((total / duration) * 1300) / 10, speed: 1, outTimeUs: frames * 40000, totalSize: frames * 1024 }
+        progress: { frame: frames, fps: Math.round((simFrames / duration) * 1300) / 10, speed: 1, outTimeUs: frames * 40000, totalSize: frames * 1024 }
       });
       if (fail && t >= 0.45) {
         clearInterval(tick);
@@ -763,9 +768,9 @@
         var sha = fakeHash(output + Date.now());
         M.applyBatchEvent(state, {
           type: "finished", index: k + 1, status: "succeeded", detail: sha,
-          report: { output: output, outputSha256: sha, framesProcessed: total }
+          report: { output: output, outputSha256: sha, framesProcessed: simFrames }
         });
-        enrichBatchEvidence(entry.sourceId, clip, sha, total);
+        enrichBatchEvidence(entry.sourceId, clip, sha, simFrames);
         runBatchEntry(k + 1);
         return;
       }

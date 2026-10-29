@@ -766,6 +766,23 @@
     return { ready: true };
   }
 
+  /** Mirror of rd_pipeline::expected_output_frames: field-rate
+      deinterlacing doubles the count; null when it depends on the file
+      (only flagged frames at field rate) or the tier is not planned here. */
+  function expectedOutputFrames(chain, sourceFrames) {
+    var frames = sourceFrames;
+    for (var i = 0; i < chain.length; i++) {
+      var s = chain[i];
+      if (s.module !== "deinterlace") continue;
+      if (s.params.engine === "qtgmc") return null;
+      if (s.params.outputRate === "send_field") {
+        if (s.params.onlyFlagged) return null;
+        frames *= 2;
+      }
+    }
+    return frames;
+  }
+
   function batchCandidates(state) {
     return D.clips.map(function (c) {
       return { sourceId: c.id, name: c.name, eligibility: batchEligibility(state, c.id) };
@@ -859,7 +876,9 @@
         sub: ev.sub || "",
         kind: "export",
         sourceId: entry.sourceId,
-        totalFrames: null
+        // The runner's stated total (probed frames, adjusted for the
+        // output rate), or null: then progress stays "measuring…".
+        totalFrames: ev.totalFrames == null ? null : ev.totalFrames
       });
       r = startJobModel(state, job);
       entry.status = "running";
@@ -989,6 +1008,7 @@
     verification: verification,
     INTERRUPTED_ERROR: INTERRUPTED_ERROR,
     batchEligibility: batchEligibility,
+    expectedOutputFrames: expectedOutputFrames,
     batchCandidates: batchCandidates,
     canStartBatch: canStartBatch,
     canResumeBatch: canResumeBatch,

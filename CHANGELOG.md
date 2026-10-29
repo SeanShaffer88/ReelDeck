@@ -28,6 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Batch progress as a percentage. Before each entry renders, the batch
+  runner states how many frames it should write —
+  `rd_run::batch::probed_frame_total`: the input's frame count from
+  ffprobe (duration × average frame rate, `ProbeInfo::estimated_video_frames`),
+  adjusted by the new `rd_pipeline::expected_output_frames` (field-rate
+  deinterlacing doubles it) — and sends it on `BatchEvent::Started`. The
+  shell creates the entry's job with that total, and `reeldeck batch`
+  prints `frame 50/200 (25%)`. When the total cannot be stated (no
+  usable probe, the archival tier, or deinterlacing only flagged frames
+  at field rate) progress stays unmeasured rather than guessed.
+  `BatchOptions::frame_total` overrides how totals are found. `rd-run`
+  now depends on `rd-analyze` (workspace-internal, previously a
+  dev-dependency); no new external dependency.
+
 - Batch queue in the shell. `rd-ui` gains `batch.rs`: which queue rows
   may join a batch (only those whose single export would be allowed,
   with the export panel's reason when not), the batch lifecycle

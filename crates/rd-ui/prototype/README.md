@@ -112,9 +112,9 @@ assets/media/           one generated sample frame
   machine.
 - **Simulated batch failures.** The batch dialog's failure switch exists
   only so the stop-and-resume path can be seen; it is labelled as such
-  and is not part of the shell's design. Batch progress shows
-  `measuring…` because, like the real runner today, it reports no frame
-  total.
+  and is not part of the shell's design. Batch totals come from the
+  sample clips' durations and rates, as the real runner's come from a
+  probe.
 - **One sample frame.** Before/after, field split and temporal difference
   are styles over that frame, not decoded video.
 - **No file access.** Adding files and disk-space measurements belong to

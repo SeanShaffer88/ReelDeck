@@ -70,12 +70,15 @@ pub enum BatchRunError {
 pub enum BatchEvent {
     /// A previously succeeded entry was re-verified and is skipped.
     Skipped { index: usize, output: PathBuf },
-    /// An attempt started.
+    /// An attempt started. `total_frames` is the number of frames the
+    /// render is expected to write, when it can be stated; progress
+    /// becomes a percentage of it.
     Started {
         index: usize,
         attempt: u32,
         input: PathBuf,
         output: PathBuf,
+        total_frames: Option<u64>,
     },
     /// A measured progress block for the running entry.
     Progress { index: usize, progress: Progress },
@@ -93,6 +96,20 @@ pub enum BatchEvent {
 /// which must be `'static`, can forward into it.
 pub type BatchEventSink = Arc<Mutex<dyn FnMut(&BatchEvent) + Send>>;
 
+/// Works out how many frames an entry's render will write.
+pub type FrameTotalFn = Box<dyn FnMut(&Recipe, &Path) -> Option<u64> + Send>;
+
+/// The default [`FrameTotalFn`]: the input's frame count from ffprobe
+/// (duration × average frame rate), adjusted by the planner for the
+/// recipe's output rate. `None` when any part is unknown — progress then
+/// stays unmeasured rather than guessed.
+pub fn probed_frame_total(recipe: &Recipe, input: &Path) -> Option<u64> {
+    let source_frames = rd_analyze::probe_ffprobe(input)
+        .ok()?
+        .estimated_video_frames()?;
+    rd_pipeline::expected_output_frames(recipe, source_frames)
+}
+
 /// Knobs for a batch run.
 pub struct BatchOptions {
     /// Keep rendering later entries after one fails (the batch still
@@ -102,6 +119,9 @@ pub struct BatchOptions {
     /// entry is cancelled and no further entry starts.
     pub cancel: Arc<AtomicBool>,
     pub on_event: Option<BatchEventSink>,
+    /// How each entry's frame total is found; `None` uses
+    /// [`probed_frame_total`].
+    pub frame_total: Option<FrameTotalFn>,
 }
 
 impl Default for BatchOptions {
@@ -110,6 +130,7 @@ impl Default for BatchOptions {
             keep_going: false,
             cancel: Arc::new(AtomicBool::new(false)),
             on_event: None,
+            frame_total: None,
         }
     }
 }
@@ -160,7 +181,7 @@ pub fn run_batch(manifest: &Path, opts: BatchOptions) -> Result<BatchReport, Bat
 /// the seam the tests use; production callers want [`run_batch`].
 pub fn run_batch_with<F>(
     manifest_path: &Path,
-    opts: BatchOptions,
+    mut opts: BatchOptions,
     mut render: F,
 ) -> Result<BatchReport, BatchRunError>
 where
@@ -236,11 +257,16 @@ where
         write_state(&state_path, &state)?;
         attempted += 1;
         let input = PathBuf::from(&state.entries[i].input);
+        let total_frames = match opts.frame_total.as_mut() {
+            Some(f) => f(&plan.recipes[i], &input),
+            None => probed_frame_total(&plan.recipes[i], &input),
+        };
         emit(BatchEvent::Started {
             index: i + 1,
             attempt: number,
             input: input.clone(),
             output: output.clone(),
+            total_frames,
         });
 
         let sink = opts.on_event.clone();
@@ -601,6 +627,9 @@ mod tests {
             on_event: Some(Arc::new(Mutex::new(move |e: &BatchEvent| {
                 sink_events.lock().unwrap().push(e.clone());
             }))),
+            frame_total: Some(Box::new(|_: &Recipe, input: &Path| {
+                (input.file_name()? == "a.mkv").then_some(250)
+            })),
             ..BatchOptions::default()
         };
         let report = run_batch_with(&manifest, opts, fake_render(vec![], calls())).unwrap();
@@ -616,6 +645,18 @@ mod tests {
             .exists());
 
         let events = events.lock().unwrap();
+        let totals: Vec<Option<u64>> = events
+            .iter()
+            .filter_map(|e| match e {
+                BatchEvent::Started { total_frames, .. } => Some(*total_frames),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            totals,
+            vec![Some(250), None],
+            "a total only where one is known"
+        );
         assert!(events.contains(&BatchEvent::Progress {
             index: 2,
             progress: Progress {

@@ -85,6 +85,22 @@ impl ProbeInfo {
     pub fn first_video(&self) -> Option<&StreamInfo> {
         self.video_streams().next()
     }
+
+    /// The first video stream's frame count, from the container
+    /// duration and the stream's average frame rate. `None` when either
+    /// is missing or unusable (a MediaKit-sourced probe carries no
+    /// frame rate; ffprobe reports `0/0` for some streams).
+    pub fn estimated_video_frames(&self) -> Option<u64> {
+        let rate = self.first_video()?.avg_frame_rate.as_deref()?;
+        let (num, den) = match rate.split_once('/') {
+            Some((n, d)) => (n.trim().parse::<f64>().ok()?, d.trim().parse::<f64>().ok()?),
+            None => (rate.trim().parse::<f64>().ok()?, 1.0),
+        };
+        if !(num > 0.0 && den > 0.0 && self.duration_secs.is_finite() && self.duration_secs > 0.0) {
+            return None;
+        }
+        Some((self.duration_secs * num / den).round() as u64)
+    }
 }
 
 // Serde shapes for ffprobe's JSON output (only the fields we consume).
@@ -914,6 +930,29 @@ TAG:lavfi.signalstats.TOUT=0.42
 TAG:lavfi.signalstats.BRNG=0.010
 [/FRAME]
 ";
+
+    #[test]
+    fn estimates_video_frames_from_duration_and_rate() {
+        let mut info = parse_ffprobe_json(FFPROBE_FIXTURE).expect("parse");
+        // 600 s at 25/1.
+        assert_eq!(info.estimated_video_frames(), Some(15_000));
+        let video = info
+            .streams
+            .iter_mut()
+            .find(|s| s.codec_type == "video")
+            .unwrap();
+        video.avg_frame_rate = Some("30000/1001".into());
+        assert_eq!(info.estimated_video_frames(), Some(17_982));
+        for unusable in [None, Some("0/0"), Some("n/a")] {
+            let video = info
+                .streams
+                .iter_mut()
+                .find(|s| s.codec_type == "video")
+                .unwrap();
+            video.avg_frame_rate = unusable.map(String::from);
+            assert_eq!(info.estimated_video_frames(), None, "{unusable:?}");
+        }
+    }
 
     #[test]
     fn parses_ffprobe_json_fixture() {

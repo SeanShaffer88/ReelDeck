@@ -126,6 +126,8 @@ fn batch_stops_resumes_and_proves_every_output() {
         second_text.contains("2 succeeded, 0 failed"),
         "{second_text}"
     );
+    // One second at 25 fps, deinterlaced one frame per field: 50 frames.
+    assert!(second_text.contains("frame 50/50 (100%)"), "{second_text}");
 
     for output in ["one.restored.mkv", "two.restored.attempt2.mkv"] {
         let verify = run_bin(&dir, &["verify", output]);

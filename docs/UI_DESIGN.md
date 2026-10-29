@@ -415,8 +415,12 @@ While a batch runs, a strip at the top of the jobs panel shows its phase
 (`Running`, `Cancelling`, `Stopped`, `Complete`), a one-line summary, and
 one row per entry: status word, attempt number, output name, and the
 output hash or the error. Each attempt is also an ordinary job row, so
-progress is the engine's measured progress (`measuring…` when the runner
-has no frame total). Queue rows carry a batch pill under the file name:
+progress is the engine's measured frame count, shown as a percentage of
+the total the runner states before the render starts: the input's probed
+frame count, doubled when the chain deinterlaces one frame per field. When
+that total cannot be stated — no usable probe, or deinterlacing only
+flagged frames at field rate, where the count depends on the file — the
+row reads `measuring…` instead of guessing. Queue rows carry a batch pill under the file name:
 `In batch`, `Rendering`, `Batch done`, `Batch failed`, `Batch cancelled`,
 or `Resume here` on the entry a resume will start at. **Cancel batch**
 stops the running render through the usual `Cancelling` drain and starts
@@ -594,7 +598,7 @@ visual reference, not the shipping binary.
 | Real FFmpeg render through this interface | **Not verified** — the prototype simulates jobs | — |
 | Batch queue model (eligibility, lifecycle, resume point, journal wiring, saved-state restore) | **Pass** — 10 `rd-ui` batch tests; the prototype's `js/model.js` mirror exercised with the same scenarios under Node | `crates/rd-ui/src/batch.rs`; authoring run (script not committed) |
 | Batch queue in the prototype (dialog, strip, queue pills, stop at a simulated failure, resume, complete) | Driven in headless Chromium at 1480 and 820 px: no page errors, focus moves into the dialog and Escape closes it, no horizontal overflow at 820 px; screenshots reviewed by the author | Authoring run (script not committed) |
-| Batch runner against real FFmpeg (CLI) | **Pass** on Linux: stop at a failing entry, resume, verify both outputs | `crates/reeldeck/tests/cli_batch.rs` (ignored by default) |
+| Batch runner against real FFmpeg (CLI) | **Pass** on Linux: stop at a failing entry, resume, verify both outputs; the probed total (25 frames, doubled for field-rate deinterlacing) reaches `frame 50/50 (100%)` | `crates/reeldeck/tests/cli_batch.rs` (ignored by default) |
 
 The three failures the first test run found (a single-match warning list,
 an export gate that read "open" with no chain, and a playhead clamped to
@@ -619,11 +623,9 @@ and cancel flag left to the shipping shell.
 
 1. **Lossless segment export** — the preview range becomes a stream-copy
    cut with its own proof; the trim model does not exist yet.
-2. **Batch queue: binding and totals** — the model and prototype exist
+2. **Batch queue binding** — the model, prototype and frame totals exist
    (§5.12); the shipping shell still has to run `rd_run::batch` on a
-   worker and write the manifest and recipes, and the runner should pass
-   each entry's frame total so batch progress can show a percentage
-   instead of `measuring…`.
+   worker and write the manifest and recipes.
 3. **Proxies** — scrubbing long files at full resolution is the next
    performance cliff.
 4. **Framework spike** (§10) and a real-display visual pass.
@@ -632,6 +634,13 @@ and cancel flag left to the shipping shell.
 
 ## Revision history
 
+- **2026-10-29 (sixth revision)** — batch frame totals: the runner
+  states each entry's expected frame count on `BatchEvent::Started`
+  (`rd_run::batch::probed_frame_total`: ffprobe duration × rate, adjusted
+  by `rd_pipeline::expected_output_frames`), and the shell creates the
+  entry's job with it, so batch progress is a percentage when the total
+  is known and `measuring…` when it is not. The prototype mirrors the
+  planner rule in `js/model.js`.
 - **2026-10-29 (fifth revision)** — the batch queue in the shell
   (§5.12): `rd-ui` gains `batch.rs` — per-source eligibility in the export
   panel's words, a batch lifecycle (`Running → Cancelling → Stopped /

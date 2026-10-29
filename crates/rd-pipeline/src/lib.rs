@@ -142,6 +142,38 @@ fn fmt_secs(v: f64) -> String {
     }
 }
 
+/// How many frames a full render of `recipe` should write, given the
+/// source's frame count — the total progress is measured against.
+///
+/// Deinterlacing one frame per field doubles the count; every other
+/// operation keeps it. `None` when the count cannot be stated: the
+/// archival tier is not planned here, and deinterlacing only flagged
+/// frames at field rate passes unflagged frames through once, so the
+/// output count depends on the flags in the file.
+pub fn expected_output_frames(recipe: &Recipe, source_frames: u64) -> Option<u64> {
+    let mut frames = source_frames;
+    for op in &recipe.operations {
+        if let Operation::Deinterlace {
+            engine,
+            output_rate,
+            only_flagged,
+            ..
+        } = op
+        {
+            if *engine == DeinterlaceEngine::Qtgmc {
+                return None;
+            }
+            if *output_rate == rd_core::OutputRate::SendField {
+                if *only_flagged {
+                    return None;
+                }
+                frames = frames.checked_mul(2)?;
+            }
+        }
+    }
+    Some(frames)
+}
+
 /// The comma-joined FFmpeg filter chain for a whole recipe, in order.
 pub fn filter_chain(recipe: &Recipe) -> Result<String, PipelineError> {
     filter_chain_with_transforms(recipe, DEFAULT_TRANSFORMS_FILE)
@@ -369,6 +401,51 @@ pub fn preview_plan(
 mod tests {
     use super::*;
     use rd_core::{FieldOrder, OutputRate};
+
+    fn deinterlace(
+        engine: DeinterlaceEngine,
+        output_rate: OutputRate,
+        only_flagged: bool,
+    ) -> Recipe {
+        Recipe::new("in.mkv", ExportPreset::PreservationMaster).push(Operation::Deinterlace {
+            engine,
+            field_order: FieldOrder::TopFieldFirst,
+            output_rate,
+            only_flagged,
+        })
+    }
+
+    #[test]
+    fn expected_output_frames_follow_the_output_rate() {
+        let field = deinterlace(DeinterlaceEngine::Bwdif, OutputRate::SendField, false);
+        assert_eq!(expected_output_frames(&field, 50), Some(100));
+        let frame = deinterlace(DeinterlaceEngine::Yadif, OutputRate::SendFrame, false);
+        assert_eq!(expected_output_frames(&frame, 50), Some(50));
+        let denoise = Recipe::new("in.mkv", ExportPreset::Access).push(Operation::Denoise {
+            engine: DenoiseEngine::Hqdn3d,
+            luma: 4.0,
+            chroma: 3.0,
+            temporal: 6.0,
+        });
+        assert_eq!(expected_output_frames(&denoise, 50), Some(50));
+    }
+
+    #[test]
+    fn expected_output_frames_are_unknown_when_they_depend_on_the_file() {
+        let flagged = deinterlace(DeinterlaceEngine::Bwdif, OutputRate::SendField, true);
+        assert_eq!(expected_output_frames(&flagged, 50), None);
+        let flagged_frame = deinterlace(DeinterlaceEngine::Bwdif, OutputRate::SendFrame, true);
+        assert_eq!(expected_output_frames(&flagged_frame, 50), Some(50));
+        let qtgmc = deinterlace(DeinterlaceEngine::Qtgmc, OutputRate::SendField, false);
+        assert_eq!(expected_output_frames(&qtgmc, 50), None);
+        assert_eq!(
+            expected_output_frames(
+                &deinterlace(DeinterlaceEngine::Bwdif, OutputRate::SendField, false),
+                u64::MAX
+            ),
+            None
+        );
+    }
 
     fn deinterlace_recipe() -> Recipe {
         Recipe::new("in.mkv", ExportPreset::PreservationMaster).push(Operation::Deinterlace {

@@ -430,16 +430,19 @@ impl ShellModel {
                 entry.output = Some(output.display().to_string());
             }
             BatchEvent::Started {
-                attempt, output, ..
+                attempt,
+                output,
+                total_frames,
+                ..
             } => {
                 let (source_index, name) = {
                     let e = self.batch_entry_mut(k);
                     (e.source_index, e.name.clone())
                 };
                 let label = format!("Batch {index}/{total} · {name}");
-                let job = self
-                    .journal
-                    .enqueue(label, JobKind::Export, Some(source_index), None);
+                let job =
+                    self.journal
+                        .enqueue(label, JobKind::Export, Some(source_index), *total_frames);
                 self.journal.start(job)?;
                 let entry = self.batch_entry_mut(k);
                 entry.status = EntryStatus::Running;
@@ -587,6 +590,7 @@ mod tests {
             attempt,
             input: PathBuf::from("in.mkv"),
             output: PathBuf::from(output),
+            total_frames: None,
         }
     }
 
@@ -801,6 +805,36 @@ mod tests {
         assert_eq!(shell.journal.get(job).unwrap().status.phase(), "cancelled");
         assert_eq!(shell.batch_ended(), Ok(BatchPhase::Stopped));
         assert_eq!(shell.batch_pill(0), Some("Resume here"));
+    }
+
+    #[test]
+    fn a_known_frame_total_turns_progress_into_a_percentage() {
+        let mut shell = shell();
+        shell.begin_batch(&[0], false).expect("begin");
+        shell
+            .apply_batch_event(&BatchEvent::Started {
+                index: 1,
+                attempt: 1,
+                input: PathBuf::from("a.mkv"),
+                output: PathBuf::from("a.restored.mkv"),
+                total_frames: Some(200),
+            })
+            .unwrap();
+        shell
+            .apply_batch_event(&BatchEvent::Progress {
+                index: 1,
+                progress: Progress {
+                    frame: 50,
+                    ..Progress::default()
+                },
+            })
+            .unwrap();
+        let job = shell.batch().unwrap().entries[0].job.unwrap();
+        assert_eq!(shell.journal.get(job).unwrap().total_frames, Some(200));
+        match &shell.journal.get(job).unwrap().status {
+            JobStatus::Running(p) => assert_eq!(p.percent, Some(25)),
+            other => panic!("expected running, got {other:?}"),
+        }
     }
 
     #[test]

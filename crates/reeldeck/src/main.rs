@@ -1493,9 +1493,11 @@ fn cmd_batch(args: &[String]) -> i32 {
     let opts = rd_run::batch::BatchOptions {
         keep_going: parsed.keep_going,
         cancel: Arc::new(AtomicBool::new(false)),
-        on_event: Some(Arc::new(std::sync::Mutex::new(
-            |event: &rd_run::batch::BatchEvent| print_batch_event(event),
-        ))),
+        on_event: Some(Arc::new(std::sync::Mutex::new({
+            let mut total_frames = None;
+            move |event: &rd_run::batch::BatchEvent| print_batch_event(event, &mut total_frames)
+        }))),
+        frame_total: None,
     };
     let report = match rd_run::batch::run_batch(&parsed.manifest, opts) {
         Ok(r) => r,
@@ -1530,7 +1532,9 @@ fn cmd_batch(args: &[String]) -> i32 {
     1
 }
 
-fn print_batch_event(event: &rd_run::batch::BatchEvent) {
+/// Print one batch event. `total_frames` carries the running entry's
+/// frame total from its `Started` event to its progress lines.
+fn print_batch_event(event: &rd_run::batch::BatchEvent, total_frames: &mut Option<u64>) {
     use rd_run::batch::BatchEvent;
     match event {
         BatchEvent::Skipped { index, output } => {
@@ -1544,7 +1548,9 @@ fn print_batch_event(event: &rd_run::batch::BatchEvent) {
             attempt,
             input,
             output,
+            total_frames: total,
         } => {
+            *total_frames = *total;
             let retry = if *attempt > 1 {
                 format!(" (attempt {attempt})")
             } else {
@@ -1557,10 +1563,7 @@ fn print_batch_event(event: &rd_run::batch::BatchEvent) {
             );
         }
         BatchEvent::Progress { index, progress } => {
-            println!(
-                "[{index}] frame {}  fps {:.1}  speed {:.2}x",
-                progress.frame, progress.fps, progress.speed
-            );
+            println!("[{index}] {}", batch_progress_text(progress, *total_frames));
         }
         BatchEvent::Finished {
             index,
@@ -1575,6 +1578,23 @@ fn print_batch_event(event: &rd_run::batch::BatchEvent) {
             }
         }
     }
+}
+
+/// `frame 50/200 (25%)  fps …` with a known total; the bare frame
+/// count without one, so no percentage is ever guessed.
+fn batch_progress_text(progress: &rd_run::Progress, total_frames: Option<u64>) -> String {
+    let frames = match total_frames.filter(|t| *t > 0) {
+        Some(total) => format!(
+            "frame {}/{total} ({}%)",
+            progress.frame,
+            (progress.frame.saturating_mul(100) / total).min(100)
+        ),
+        None => format!("frame {}", progress.frame),
+    };
+    format!(
+        "{frames}  fps {:.1}  speed {:.2}x",
+        progress.fps, progress.speed
+    )
 }
 
 fn print_batch_state(state: &rd_core::BatchState) {
@@ -1965,6 +1985,33 @@ mod tests {
         let (found, _) = resolve_beside("elsewhere/media.mkv", Some(&dir));
         assert_eq!(found, Some(beside));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn batch_progress_shows_a_percentage_only_with_a_total() {
+        let progress = rd_run::Progress {
+            frame: 50,
+            fps: 25.0,
+            speed: 1.0,
+            ..rd_run::Progress::default()
+        };
+        assert_eq!(
+            batch_progress_text(&progress, Some(200)),
+            "frame 50/200 (25%)  fps 25.0  speed 1.00x"
+        );
+        assert_eq!(
+            batch_progress_text(&progress, None),
+            "frame 50  fps 25.0  speed 1.00x"
+        );
+        assert_eq!(
+            batch_progress_text(&progress, Some(0)),
+            "frame 50  fps 25.0  speed 1.00x"
+        );
+        let over = rd_run::Progress {
+            frame: 260,
+            ..progress
+        };
+        assert!(batch_progress_text(&over, Some(200)).starts_with("frame 260/200 (100%)"));
     }
 
     #[test]
