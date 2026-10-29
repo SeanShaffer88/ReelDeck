@@ -24,6 +24,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod batch;
 pub mod chain;
 pub mod format;
 pub mod jobs;
@@ -36,6 +37,9 @@ use serde::{Deserialize, Serialize};
 
 use rd_core::{Operation, Recipe};
 
+pub use batch::{
+    BatchCandidate, BatchEligibility, BatchPhase, BatchSession, BatchSessionEntry, BatchShellError,
+};
 pub use chain::{
     add_module, export_is_ready, export_preflight, has_module, insert_step, move_step_down,
     move_step_up, parameter_watch_points, preview_required, remove_step, replace_step, reset_step,
@@ -401,6 +405,9 @@ pub struct ShellModel {
     /// to this journal; it spawns no process itself.
     #[serde(default)]
     pub journal: JobJournal,
+    /// The batch being run or last run, when there is one.
+    #[serde(default)]
+    pub batch: Option<BatchSession>,
     /// Where the operator is in the workflow.
     #[serde(default)]
     pub stage: Stage,
@@ -672,7 +679,13 @@ impl ShellModel {
     /// and reporting "open" would let the interface offer a render that
     /// cannot run.
     pub fn export_gate_open(&self) -> bool {
-        let Some(source) = self.source() else {
+        self.selected.is_some_and(|i| self.export_gate_open_for(i))
+    }
+
+    /// [`ShellModel::export_gate_open`] for any queue row, selected or
+    /// not — the batch dialog asks it of every source.
+    pub fn export_gate_open_for(&self, index: usize) -> bool {
+        let Some(source) = self.sources.get(index) else {
             return false;
         };
         let Some(recipe) = &source.recipe else {
@@ -681,14 +694,21 @@ impl ShellModel {
         if recipe.operations.is_empty() {
             return false;
         }
-        self.preview_gate().is_none() || source.previewed || source.expert_override
+        preview_required(recipe).is_none() || source.previewed || source.expert_override
     }
 
     /// What the export panel checks before rendering, filled with the
     /// facts the shell knows. The app adds destination paths, free space,
     /// and an output-size estimate — facts only the filesystem has.
     pub fn export_facts(&self) -> ExportFacts {
-        let Some(source) = self.source() else {
+        self.selected
+            .map(|i| self.export_facts_for(i))
+            .unwrap_or_default()
+    }
+
+    /// [`ShellModel::export_facts`] for any queue row.
+    pub fn export_facts_for(&self, index: usize) -> ExportFacts {
+        let Some(source) = self.sources.get(index) else {
             return ExportFacts::default();
         };
         let chain_len = source
@@ -696,9 +716,11 @@ impl ShellModel {
             .as_ref()
             .map(|r| r.operations.len())
             .unwrap_or(0);
-        let chain_error = self
-            .chain_filter()
-            .and_then(|r| r.err())
+        let chain_error = source
+            .recipe
+            .as_ref()
+            .and_then(|recipe| rd_pipeline::filter_chain(recipe).err())
+            .map(|e| e.to_string())
             .filter(|_| chain_len > 0);
         ExportFacts {
             chain_len,

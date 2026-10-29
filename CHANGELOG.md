@@ -28,6 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Batch queue in the shell. `rd-ui` gains `batch.rs`: which queue rows
+  may join a batch (only those whose single export would be allowed,
+  with the export panel's reason when not), the batch lifecycle
+  (`Running → Cancelling → Stopped / Complete`), the resume point, and
+  restoring a saved `BatchState`. Each attempt runs as an Export job in
+  the existing journal, so progress stays measured-only, and a succeeded
+  entry writes its export evidence back to its source.
+  `ShellModel::export_gate_open_for` / `export_facts_for` answer for any
+  queue row. `rd_run::batch::BatchEvent::Finished` now carries the run's
+  `RunReport` on success. The prototype mirrors the rules in
+  `js/model.js` and adds a batch dialog (`Ctrl+B`), a batch strip in the
+  jobs panel, queue-row batch pills, and a simulated driver. No new
+  dependency.
+
 - Batch queue: `reeldeck batch <manifest.json> [--keep-going]
   [--status]` renders a manifest's recipes in order, each with its
   own recipe and export-log proof. `rd-core` gains the versioned

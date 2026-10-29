@@ -154,7 +154,8 @@
         '<td><button class="clip-name" data-action="select-clip" data-id="' + c.id + '"' +
         ' aria-label="Select ' + U.esc(c.name) + ', ' + U.esc(c.sub) + '">' +
         '<img class="queue-thumb" alt="" src="assets/media/frame-ashland.jpg">' +
-        '<span class="clip-label"><b class="truncate">' + U.esc(c.name) + "</b><span>" + U.esc(c.sub) + "</span></span></button></td>" +
+        '<span class="clip-label"><b class="truncate">' + U.esc(c.name) + "</b><span>" + U.esc(c.sub) + "</span>" +
+        batchPillFor(c.id) + "</span></button></td>" +
         '<td><span class="row tight">' + fix + insp + "</span></td>" +
         '<td class="num mono-num faint">' + f.duration(c.duration) + "</td></tr>";
     }).join("");
@@ -457,10 +458,12 @@
       return j.state === "running" || j.state === "cancelling" || j.state === "queued";
     }).length;
     $("jobs-count").textContent = count ? count + " active" : "none running";
-    var hasAny = state.jobs.length > 0;
-    $("jobs-summary").textContent = hasAny
-      ? state.jobs[state.jobs.length - 1].label
-      : "Renders appear here with measured progress.";
+    var hasAny = state.jobs.length > 0 || !!state.batch;
+    $("jobs-summary").textContent = state.batch
+      ? M.batchSummary(state.batch)
+      : hasAny
+        ? state.jobs[state.jobs.length - 1].label
+        : "Renders appear here with measured progress.";
     if (count) wrap.dataset.open = "true";
     $("jobs-head").setAttribute("aria-expanded", wrap.dataset.open);
     wrap.querySelector(".jobs-caret").style.transform = wrap.dataset.open === "true" ? "" : "rotate(-90deg)";
@@ -470,7 +473,7 @@
       body.innerHTML = '<div class="job-empty">No jobs. Previews and exports run here, off the interface, with measured progress and cooperative cancellation.</div>';
       return;
     }
-    body.innerHTML = state.jobs.map(function (j) {
+    body.innerHTML = renderBatchStrip() + state.jobs.map(function (j) {
       var pct = j.progress && j.progress.percent == null ? "measuring…" : (j.progress ? j.progress.percent + "%" : "measuring…");
       var right;
       if (j.state === "running") {
@@ -541,6 +544,11 @@
   function cancelJob(id) {
     var job = state.jobs.find(function (j) { return j.id === id; });
     if (!job || job.state !== "running") return;
+    // A batch entry's job is cancelled through the batch, which also
+    // stops the entries after it.
+    var b = state.batch;
+    var running = b ? M.batchRunning(b) : -1;
+    if (running >= 0 && b.entries[running].job === id) { cancelBatch(); return; }
     M.requestCancel(state, id);
     renderJobs();
     // Cooperative drain: the engine would observe the flag, stop between
@@ -553,6 +561,277 @@
       toast("warn", "Job cancelled", "No output was written. The partial file was removed.");
       announce("Job cancelled.");
     }, 220);
+  }
+
+  // ------------------------------------------------------------------ batch
+  // The dialog chooses sources; the driver below plays the part of
+  // rd_run::batch::run_batch, emitting the same events. Rules live in
+  // js/model.js (mirroring crates/rd-ui/src/batch.rs), not here.
+
+  // Prototype-only: which source should fail its first attempt, so the
+  // stop-and-resume path can be seen. Never part of the real shell.
+  var batchSim = { failOnce: null, failed: {} };
+
+  var BATCH_PILL_STATE = {
+    "In batch": "idle",
+    "Rendering": "info",
+    "Batch done": "ok",
+    "Batch failed": "err",
+    "Batch cancelled": "warn",
+    "Resume here": "warn"
+  };
+
+  var BATCH_PILL_HINT = {
+    "In batch": "Waiting its turn in the batch",
+    "Rendering": "This source is rendering now; progress is in the jobs panel",
+    "Batch done": "Rendered; the recipe and export log are beside the output",
+    "Batch failed": "This source's attempt failed; the reason is in the jobs panel",
+    "Batch cancelled": "The render was cancelled and its partial output removed",
+    "Resume here": "The batch stopped here; resuming continues with this source"
+  };
+
+  function batchPillFor(id) {
+    var word = M.batchPill(state, id);
+    return word ? U.pill(word, BATCH_PILL_STATE[word], BATCH_PILL_HINT[word]) : "";
+  }
+
+  function openBatch() {
+    var b = state.batch;
+    var active = b && (b.phase === "running" || b.phase === "cancelling");
+    var candidates = M.batchCandidates(state);
+    var readyCount = candidates.filter(function (c) { return c.eligibility.ready; }).length;
+    var preset = D.presets.find(function (p) { return p.id === state.presetId; });
+    $("batch-sub").textContent = readyCount + " of " + candidates.length + " sources ready";
+
+    var stateHtml = "";
+    if (active) {
+      stateHtml = callout("info", "A batch is running", M.batchSummary(b) + ". Cancel it from the jobs panel, or wait for it to end.");
+    } else if (b && b.phase === "stopped") {
+      var at = M.batchResumePoint(b);
+      stateHtml = callout("", "The last batch stopped", M.batchSummary(b) + ". Resume continues at entry " + (at + 1) + " (" + b.entries[at].name + "); entries that finished are checked again and skipped. Starting a new batch replaces this record.");
+    }
+    $("batch-state").innerHTML = stateHtml;
+
+    $("batch-list").innerHTML = candidates.map(function (c) {
+      var ready = c.eligibility.ready;
+      var inputId = "batch-src-" + c.sourceId;
+      return '<label class="batch-choice" for="' + inputId + '" data-ready="' + ready + '">' +
+        '<input type="checkbox" id="' + inputId + '" data-source="' + c.sourceId + '"' +
+        (ready ? (active ? " disabled" : " checked") : " disabled") +
+        ' aria-describedby="' + inputId + '-why">' +
+        '<span class="batch-choice-name"><b>' + U.esc(c.name) + "</b>" +
+        '<span id="' + inputId + '-why" class="' + (ready ? "faint" : "batch-why") + '">' +
+        U.esc(ready ? "Ready: chain previewed, hash matches." : c.eligibility.reason) + "</span></span>" +
+        (ready ? U.pill("Ready", "ok") : U.pill("Blocked", "idle", c.eligibility.reason)) +
+        "</label>";
+    }).join("");
+
+    var options = '<label class="batch-choice" for="batch-keep-going">' +
+      '<input type="checkbox" id="batch-keep-going"' + (b && b.keepGoing ? " checked" : "") + (active ? " disabled" : "") + ">" +
+      '<span class="batch-choice-name"><b>Keep going after a failure</b>' +
+      '<span class="faint">Off: the batch stops at the failed file so you can fix it and resume there. On: the rest render first; the failed file still waits for a resume.</span></span></label>' +
+      '<p class="batch-note">Each source renders its own chain with the current export intent (' + U.esc(preset.title) + "). A retry writes a new file name (<code>…attempt2</code>), so an earlier attempt's proof is never touched.</p>" +
+      '<label class="batch-sim" for="batch-sim-fail"><span>Prototype only — make a source fail its first attempt:</span>' +
+      '<select id="batch-sim-fail"' + (active ? " disabled" : "") + '><option value="">None</option>' +
+      candidates.filter(function (c) { return c.eligibility.ready; }).map(function (c) {
+        return '<option value="' + c.sourceId + '"' + (batchSim.failOnce === c.sourceId ? " selected" : "") + ">" + U.esc(c.name) + "</option>";
+      }).join("") + "</select></label>";
+    $("batch-options").innerHTML = options;
+
+    var resume = $("batch-resume");
+    resume.hidden = !(b && b.phase === "stopped");
+    if (!resume.hidden) resume.textContent = "Resume at entry " + (M.batchResumePoint(b) + 1);
+    var start = $("batch-start");
+    start.disabled = active || readyCount === 0;
+    updateBatchStartLabel();
+    $("batch-hint").textContent = readyCount === 0 && !active
+      ? "No source is ready: each needs a chain, a matching hash, and a preview."
+      : "Simulated in this prototype — no file is written.";
+    openDialog("scrim-batch", !resume.hidden ? resume : (start.disabled ? null : start));
+  }
+
+  function chosenBatchSources() {
+    return Array.prototype.slice.call(document.querySelectorAll("#batch-list input[type=checkbox]:checked"))
+      .map(function (el) { return el.dataset.source; });
+  }
+
+  function updateBatchStartLabel() {
+    var n = chosenBatchSources().length;
+    var start = $("batch-start");
+    start.textContent = n ? "Start batch (" + n + ")" : "Start batch";
+    var b = state.batch;
+    start.disabled = n === 0 || !!(b && (b.phase === "running" || b.phase === "cancelling"));
+  }
+
+  function startBatch() {
+    var ids = chosenBatchSources();
+    var keepGoing = $("batch-keep-going").checked;
+    batchSim.failOnce = $("batch-sim-fail").value || null;
+    batchSim.failed = {};
+    var r = M.beginBatch(state, ids, keepGoing);
+    if (!r.ok) { toast("warn", "Batch not started", r.error); return; }
+    closeDialog("scrim-batch");
+    runBatchSim();
+  }
+
+  function resumeBatch() {
+    var r = M.resumeBatch(state);
+    if (!r.ok) { toast("warn", "Batch not resumed", r.error); return; }
+    closeAllDialogs();
+    runBatchSim();
+  }
+
+  function cancelBatch() {
+    var r = M.requestBatchCancel(state);
+    if (!r.ok) { toast("warn", "Nothing to cancel", r.error); return; }
+    renderBatchViews();
+    announce("Batch cancelling. The running render stops between frames and removes its partial output.");
+  }
+
+  function batchOutputName(clip, attempt) {
+    var preset = D.presets.find(function (p) { return p.id === state.presetId; });
+    var stem = clip.file.replace(/\.[^.]+$/, "") + ".restored";
+    return stem + (attempt > 1 ? ".attempt" + attempt : "") + "." + preset.extension;
+  }
+
+  function runBatchSim() {
+    var b = state.batch;
+    // As the runner does: finished entries are re-verified and skipped.
+    b.entries.forEach(function (e, k) {
+      if (e.status === "succeeded") M.applyBatchEvent(state, { type: "skipped", index: k + 1, output: e.output });
+    });
+    renderBatchViews();
+    announce(M.batchSummary(b) + ".");
+    runBatchEntry(0);
+  }
+
+  function runBatchEntry(k) {
+    var b = state.batch;
+    if (b.phase === "cancelling") { finishBatch(); return; }
+    while (k < b.entries.length && b.entries[k].status === "succeeded") k++;
+    if (k >= b.entries.length) { finishBatch(); return; }
+    var entry = b.entries[k];
+    var clip = D.clips.find(function (c) { return c.id === entry.sourceId; });
+    var attempt = entry.attempts + 1;
+    var output = batchOutputName(clip, attempt);
+    M.applyBatchEvent(state, {
+      type: "started", index: k + 1, attempt: attempt, output: output,
+      sub: "Simulated in this prototype · attempt " + attempt + " · " + basename(output)
+    });
+    renderBatchViews();
+    announce("Batch: rendering " + clip.name + ".");
+    var fail = batchSim.failOnce === entry.sourceId && !batchSim.failed[entry.sourceId];
+    var total = Math.round(clip.duration * f.fps(clip.rate));
+    var started = Date.now();
+    var duration = 2400;
+    var tick = setInterval(function () {
+      if (b.phase === "cancelling") {
+        clearInterval(tick);
+        delete timers.batch;
+        // Cooperative drain, as with single jobs.
+        setTimeout(function () {
+          M.applyBatchEvent(state, { type: "finished", index: k + 1, status: "cancelled", detail: "cancelled by operator" });
+          finishBatch();
+        }, 220);
+        return;
+      }
+      var t = Math.min(1, (Date.now() - started) / duration);
+      var frames = Math.round((1 - Math.pow(1 - t, 1.8)) * total);
+      M.applyBatchEvent(state, {
+        type: "progress", index: k + 1,
+        progress: { frame: frames, fps: Math.round((total / duration) * 1300) / 10, speed: 1, outTimeUs: frames * 40000, totalSize: frames * 1024 }
+      });
+      if (fail && t >= 0.45) {
+        clearInterval(tick);
+        delete timers.batch;
+        batchSim.failed[entry.sourceId] = true;
+        M.applyBatchEvent(state, {
+          type: "finished", index: k + 1, status: "failed",
+          detail: "render failed: ffmpeg exited with status 1 (simulated failure)"
+        });
+        renderBatchViews();
+        toast("err", clip.name + " failed", b.keepGoing
+          ? "Its proof records the failure. The batch keeps going; resume it later to retry this file."
+          : "Its proof records the failure. The batch stopped here; resume to retry this file.");
+        if (b.keepGoing) runBatchEntry(k + 1);
+        else finishBatch();
+        return;
+      }
+      if (t >= 1) {
+        clearInterval(tick);
+        delete timers.batch;
+        var sha = fakeHash(output + Date.now());
+        M.applyBatchEvent(state, {
+          type: "finished", index: k + 1, status: "succeeded", detail: sha,
+          report: { output: output, outputSha256: sha, framesProcessed: total }
+        });
+        enrichBatchEvidence(entry.sourceId, clip, sha, total);
+        runBatchEntry(k + 1);
+        return;
+      }
+      renderJobs();
+    }, 130);
+    timers.batch = tick;
+  }
+
+  /** The model records the output and its hash; the Prove panel also
+      shows the facts a real export log carries. */
+  function enrichBatchEvidence(sourceId, clip, sha, frames) {
+    var preset = D.presets.find(function (p) { return p.id === state.presetId; });
+    var record = sourceId === state.selectedId ? state.exported : (state.sourceFlags[sourceId] || {}).exported;
+    if (!record) return;
+    Object.assign(record, {
+      size: Math.round(clip.sizeBytes * preset.facts.sizeFactor),
+      streamSha: fakeHash("streams" + sha),
+      sourceSha256: clip.fixity.sha256,
+      presetLabel: preset.title,
+      verifiedAt: f.clockTime(nowSeconds()).slice(0, 8),
+      rerun: null
+    });
+    D.project.outputCount += 1;
+  }
+
+  function finishBatch() {
+    var r = M.batchEnded(state);
+    renderBatchViews();
+    renderInspector();
+    renderStages();
+    var summary = M.batchSummary(state.batch);
+    announce(summary + ".");
+    if (r.ok && r.phase === "complete") toast("ok", "Batch complete", summary + ". Each output has its recipe and export log beside it.");
+    else toast("warn", "Batch stopped", summary + ".");
+  }
+
+  function renderBatchViews() {
+    renderJobs();
+    renderQueue();
+  }
+
+  function renderBatchStrip() {
+    var b = state.batch;
+    if (!b) return "";
+    var action = b.phase === "running"
+      ? '<button class="btn btn-sm" data-action="cancel-batch">Cancel batch</button>'
+      : b.phase === "stopped"
+        ? '<button class="btn btn-sm btn-primary" data-action="resume-batch">Resume at entry ' + (M.batchResumePoint(b) + 1) + "</button>"
+        : '<span class="faint batch-phase-note">' + (b.phase === "cancelling" ? "stopping…" : "all outputs proved") + "</span>";
+    var phaseState = { running: "info", cancelling: "warn", stopped: "warn", complete: "ok" }[b.phase];
+    var at = b.phase === "stopped" ? M.batchResumePoint(b) : -1;
+    var words = { pending: "Pending", running: "Rendering", succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled" };
+    return '<section class="batch-strip" aria-label="Batch">' +
+      '<div class="batch-head">' + U.pill("Batch · " + M.batchPhaseWord(b.phase), phaseState) +
+      '<span class="batch-summary">' + U.esc(M.batchSummary(b)) + "</span><span class=\"spacer\"></span>" + action + "</div>" +
+      '<ol class="batch-entries">' + b.entries.map(function (e, k) {
+        var detail = e.status === "succeeded" && e.detail ? "SHA-256 " + f.shortHash(e.detail) : e.detail;
+        return '<li data-status="' + e.status + '"' + (k === at ? ' data-resume="true"' : "") + ">" +
+          '<span class="mono-num faint">' + (k + 1) + "</span>" +
+          '<b class="truncate">' + U.esc(e.name) + "</b>" +
+          '<span class="batch-entry-status">' + words[e.status] + (k === at ? " · resume here" : "") + "</span>" +
+          '<span class="faint truncate" title="' + U.esc(e.output || "") + '">' +
+          (e.attempts ? "attempt " + e.attempts + " · " + U.esc(basename(e.output || "")) : "not started") + "</span>" +
+          '<span class="truncate batch-entry-detail" title="' + U.esc(e.detail || "") + '">' + U.esc(detail || "") + "</span>" +
+          "</li>";
+      }).join("") + "</ol></section>";
   }
 
   // ------------------------------------------------------------------ inspector
@@ -1587,6 +1866,7 @@
       case "prefs": openPrefs(); break;
       case "addSource": addSource(); break;
       case "rehash": rehash(); break;
+      case "batch": openBatch(); break;
       case "about": toast("ok", "ReelDeck prototype", "Shell prototype for the restoration workspace. Engine: FFmpeg. Local only: no accounts, no telemetry, no network."); break;
       default: break;
     }
@@ -1903,6 +2183,9 @@
         if (item) runCommand(item.id);
       } else if (e.key === "Escape") { e.preventDefault(); closeAllDialogs(); }
     });
+    $("batch-start").addEventListener("click", startBatch);
+    $("batch-resume").addEventListener("click", resumeBatch);
+    $("batch-list").addEventListener("change", updateBatchStartLabel);
     document.querySelectorAll("[data-close-dialog]").forEach(function (b) {
       b.addEventListener("click", function () { closeDialog(b.getAttribute("data-close-dialog")); });
     });
@@ -2057,6 +2340,9 @@
       case "rehash": rehash(); break;
       case "rerunInspect": rerunInspect(); break;
       case "addSource": addSource(); break;
+      case "openBatch": openBatch(); break;
+      case "cancel-batch": cancelBatch(); break;
+      case "resume-batch": resumeBatch(); break;
       case "copy-sha": copy(target.dataset.sha, "SHA-256 copied"); break;
       case "copy-filter": copy(M.chainFilter(state).filter, "Filter string copied"); break;
       case "copy-command": {
@@ -2237,6 +2523,7 @@
       "Ctrl+O": "source.add",
       "Ctrl+Shift+H": "source.rehash",
       "Ctrl+E": "export.open",
+      "Ctrl+B": "batch.open",
       "Ctrl+Enter": "preview.render",
       "Ctrl+Shift+Enter": "export.run",
       "Ctrl+Shift+V": "proof.verify",

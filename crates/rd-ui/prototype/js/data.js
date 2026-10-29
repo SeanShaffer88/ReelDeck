@@ -318,6 +318,7 @@
     { id: "chain.reset", run: "resetStep", title: "Reset step to defaults", keys: "Alt+Backspace", group: "Chain", hint: "", aliases: "defaults restore" },
     { id: "preview.range_suggestion", run: "suggestRange", title: "Suggest a preview range", keys: "Shift+I", group: "Deliver", hint: "Centres a segment on the worst measured moment, not the first seconds.", aliases: "worst frames anomalies segment" },
     { id: "preview.render", run: "renderPreview", title: "Render preview segment", keys: "Ctrl+Enter", group: "Deliver", hint: "Renders the chain over the selected segment, with its proof.", aliases: "segment preview render test" },
+    { id: "batch.open", run: "batch", title: "Batch render…", keys: "Ctrl+B", group: "Deliver", hint: "Render several sources in order, each with its own proof; a stopped batch resumes at the file that did not finish.", aliases: "queue many sources resume all" },
     { id: "export.open", run: "tab", arg: "export", title: "Open export panel", keys: "Ctrl+E", group: "Deliver", hint: "", aliases: "deliver render master" },
     { id: "export.run", run: "renderExport", title: "Render export", keys: "Ctrl+Shift+Enter", group: "Deliver", hint: "Writes the output plus its recipe and export log beside it.", aliases: "deliver render master" },
     { id: "proof.verify", run: "verify", title: "Verify output", keys: "Ctrl+Shift+V", group: "Deliver", hint: "", aliases: "check hash prove sidecar" },

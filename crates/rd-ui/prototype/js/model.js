@@ -68,6 +68,8 @@
       inspectorOpen: false,
       queueFilter: "",
       jobs: [],
+      // The batch being run or last run (mirrors ShellModel::batch).
+      batch: null,
       toastSeq: 0
     };
   }
@@ -727,6 +729,216 @@
     return { ok: true };
   }
 
+  // ------------------------------------------------------------- batch queue
+  // Mirror of crates/rd-ui/src/batch.rs. Only sources whose single export
+  // would be allowed may join; every attempt is a job in the journal; a
+  // stopped batch resumes at the first entry that has not succeeded.
+
+  var INTERRUPTED_ERROR = "interrupted: the previous batch run stopped before this attempt finished";
+
+  /** A source's chain and evidence, whether or not it is selected. */
+  function sourceView(state, id) {
+    if (id === state.selectedId) {
+      return { chain: state.chain, previewed: state.previewed, override: state.override };
+    }
+    var flags = state.sourceFlags[id] || {};
+    return { chain: state.chains[id] || [], previewed: !!flags.previewed, override: !!flags.override };
+  }
+
+  /** { ready: true } or { ready: false, reason } — the same order and
+      words as ShellModel::batch_eligibility. */
+  function batchEligibility(state, id) {
+    var clip = D.clips.find(function (c) { return c.id === id; });
+    if (!clip) return { ready: false, reason: "This queue row no longer exists." };
+    if (clip.fixity && clip.fixity.state === "mismatch") {
+      return { ready: false, reason: "Hash mismatch: the file changed since ingest, so exports from it are blocked." };
+    }
+    var view = sourceView(state, id);
+    if (!view.chain.length) return { ready: false, reason: "No chain yet: build one in Decide first." };
+    if (previewGate({ chain: view.chain }) && !view.previewed && !view.override) {
+      return { ready: false, reason: "Preview required: render a preview segment of this chain first, or record an override." };
+    }
+    var plan = chainFilter({ chain: view.chain });
+    if (!plan.ok) return { ready: false, reason: "The planner refuses this chain: " + plan.error };
+    if (!view.previewed && !view.override) {
+      return { ready: false, reason: "Preview this chain on a segment first, or record the expert override in the export panel." };
+    }
+    return { ready: true };
+  }
+
+  function batchCandidates(state) {
+    return D.clips.map(function (c) {
+      return { sourceId: c.id, name: c.name, eligibility: batchEligibility(state, c.id) };
+    });
+  }
+
+  function batchActive(state) {
+    return !!state.batch && (state.batch.phase === "running" || state.batch.phase === "cancelling");
+  }
+
+  function canStartBatch(state) {
+    return !batchActive(state) && D.clips.some(function (c) { return batchEligibility(state, c.id).ready; });
+  }
+
+  function canResumeBatch(state) { return !!state.batch && state.batch.phase === "stopped"; }
+  function canCancelBatch(state) { return !!state.batch && state.batch.phase === "running"; }
+
+  function batchResumePoint(batch) {
+    for (var i = 0; i < batch.entries.length; i++) {
+      if (batch.entries[i].status !== "succeeded") return i;
+    }
+    return -1;
+  }
+
+  function batchRunning(batch) {
+    for (var i = 0; i < batch.entries.length; i++) {
+      if (batch.entries[i].status === "running") return i;
+    }
+    return -1;
+  }
+
+  function batchSucceeded(batch) {
+    return batch.entries.filter(function (e) { return e.status === "succeeded"; }).length;
+  }
+
+  /** Begin a batch over the chosen sources, in order. Refuses as a whole. */
+  function beginBatch(state, ids, keepGoing) {
+    if (batchActive(state)) return { ok: false, error: "a batch is already running; cancel it or wait for it to end" };
+    if (!ids.length) return { ok: false, error: "choose at least one source for the batch" };
+    var entries = [];
+    for (var n = 0; n < ids.length; n++) {
+      var clip = D.clips.find(function (c) { return c.id === ids[n]; });
+      if (!clip) return { ok: false, error: "queue row " + ids[n] + " does not exist" };
+      if (ids.indexOf(ids[n]) !== n) return { ok: false, error: clip.name + " is chosen twice; each source renders once per batch" };
+      var e = batchEligibility(state, ids[n]);
+      if (!e.ready) return { ok: false, error: clip.name + " cannot join the batch: " + e.reason };
+      entries.push({ sourceId: clip.id, name: clip.name, status: "pending", attempts: 0, output: null, detail: null, job: null });
+    }
+    state.batch = { entries: entries, keepGoing: !!keepGoing, phase: "running" };
+    return { ok: true };
+  }
+
+  /** Stopped → Running. Returns the 0-based entry the runner starts at. */
+  function resumeBatch(state) {
+    var b = state.batch;
+    if (!b) return { ok: false, error: "there is no batch to resume" };
+    if (b.phase !== "stopped") return { ok: false, error: "the batch is " + b.phase + ", so it cannot be resumed" };
+    var at = batchResumePoint(b);
+    if (at < 0) return { ok: false, error: "the batch is complete, so it cannot be resumed" };
+    b.phase = "running";
+    return { ok: true, at: at };
+  }
+
+  /** Running → Cancelling, with the running entry's job. */
+  function requestBatchCancel(state) {
+    var b = state.batch;
+    if (!b) return { ok: false, error: "there is no batch to cancel" };
+    if (b.phase !== "running") return { ok: false, error: "the batch is " + b.phase + ", so it cannot be cancelled" };
+    b.phase = "cancelling";
+    var i = batchRunning(b);
+    if (i >= 0 && b.entries[i].job) requestCancel(state, b.entries[i].job);
+    return { ok: true };
+  }
+
+  /** Apply one runner event, shaped like rd_run::batch::BatchEvent:
+      { type: "skipped"|"started"|"progress"|"finished", index (1-based), ... }. */
+  function applyBatchEvent(state, ev) {
+    var b = state.batch;
+    if (!b) return { ok: false, error: "there is no batch to update" };
+    if (!ev.index || ev.index > b.entries.length) {
+      return { ok: false, error: "batch event for entry " + ev.index + ", which this batch does not have" };
+    }
+    var entry = b.entries[ev.index - 1];
+    var r = { ok: true };
+    if (ev.type === "skipped") {
+      entry.status = "succeeded";
+      entry.output = ev.output;
+    } else if (ev.type === "started") {
+      var job = enqueueJob(state, {
+        label: "Batch " + ev.index + "/" + b.entries.length + " · " + entry.name,
+        sub: ev.sub || "",
+        kind: "export",
+        sourceId: entry.sourceId,
+        totalFrames: null
+      });
+      r = startJobModel(state, job);
+      entry.status = "running";
+      entry.attempts = ev.attempt;
+      entry.output = ev.output;
+      entry.detail = null;
+      entry.job = job;
+    } else if (ev.type === "progress") {
+      if (entry.job) r = jobProgress(state, entry.job, ev.progress);
+    } else if (ev.type === "finished") {
+      if (entry.job) {
+        if (ev.status === "succeeded") r = succeedJob(state, entry.job, ev.report || null);
+        else if (ev.status === "cancelled") r = confirmCancelled(state, entry.job);
+        else r = failJob(state, entry.job, ev.detail);
+      }
+      entry.status = ev.status;
+      entry.detail = ev.detail;
+      if (ev.status === "succeeded" && ev.report) {
+        // Evidence for Prove, as ShellModel::job_succeeded writes it.
+        var exported = { name: ev.report.output, sha256: ev.report.outputSha256, frames: ev.report.framesProcessed };
+        if (entry.sourceId === state.selectedId) state.exported = Object.assign({}, state.exported || {}, exported);
+        else {
+          var flags = state.sourceFlags[entry.sourceId] || (state.sourceFlags[entry.sourceId] = { previewed: false, override: false, exported: null, verified: null });
+          flags.exported = Object.assign({}, flags.exported || {}, exported);
+        }
+      }
+    } else {
+      return { ok: false, error: "unknown batch event " + ev.type };
+    }
+    return r;
+  }
+
+  /** The runner returned: Complete if every entry succeeded, else Stopped. */
+  function batchEnded(state) {
+    var b = state.batch;
+    if (!b) return { ok: false, error: "there is no batch to end" };
+    if (b.phase !== "running" && b.phase !== "cancelling") return { ok: false, error: "the batch is " + b.phase + ", so it cannot be ended" };
+    b.phase = batchResumePoint(b) < 0 ? "complete" : "stopped";
+    return { ok: true, phase: b.phase };
+  }
+
+  /** The queue row pill for a source in the current batch, or null. */
+  function batchPill(state, id) {
+    var b = state.batch;
+    if (!b) return null;
+    for (var k = 0; k < b.entries.length; k++) {
+      var e = b.entries[k];
+      if (e.sourceId !== id) continue;
+      if (b.phase === "stopped" && batchResumePoint(b) === k) return "Resume here";
+      return {
+        pending: "In batch",
+        running: "Rendering",
+        succeeded: "Batch done",
+        failed: "Batch failed",
+        cancelled: "Batch cancelled"
+      }[e.status];
+    }
+    return null;
+  }
+
+  function batchPhaseWord(phase) {
+    return { running: "Running", cancelling: "Cancelling", stopped: "Stopped", complete: "Complete" }[phase] || phase;
+  }
+
+  /** One line for the panel header and the live region. */
+  function batchSummary(batch) {
+    var total = batch.entries.length;
+    var done = batchSucceeded(batch);
+    if (batch.phase === "running") {
+      var i = batchRunning(batch);
+      return "Batch running · " + done + " of " + total + " succeeded" + (i >= 0 ? " · rendering " + (i + 1) + " of " + total : "");
+    }
+    if (batch.phase === "cancelling") return "Batch cancelling · " + done + " of " + total + " succeeded · waiting for the render to stop";
+    if (batch.phase === "complete") return "Batch complete · " + done + " of " + total + " succeeded";
+    var at = batchResumePoint(batch);
+    if (at < 0) return "Batch stopped · " + done + " of " + total + " succeeded";
+    return "Batch stopped · " + done + " of " + total + " succeeded · entry " + (at + 1) + " " + batch.entries[at].status + " · resume continues there";
+  }
+
   global.RD.model = {
     LIMITS: LIMITS,
     defaultPrefs: defaultPrefs,
@@ -774,6 +986,23 @@
     ready: ready,
     exportCommand: exportCommand,
     sizeEstimateText: sizeEstimateText,
-    verification: verification
+    verification: verification,
+    INTERRUPTED_ERROR: INTERRUPTED_ERROR,
+    batchEligibility: batchEligibility,
+    batchCandidates: batchCandidates,
+    canStartBatch: canStartBatch,
+    canResumeBatch: canResumeBatch,
+    canCancelBatch: canCancelBatch,
+    batchResumePoint: batchResumePoint,
+    batchRunning: batchRunning,
+    batchSucceeded: batchSucceeded,
+    beginBatch: beginBatch,
+    resumeBatch: resumeBatch,
+    requestBatchCancel: requestBatchCancel,
+    applyBatchEvent: applyBatchEvent,
+    batchEnded: batchEnded,
+    batchPill: batchPill,
+    batchPhaseWord: batchPhaseWord,
+    batchSummary: batchSummary
   };
 })(window);

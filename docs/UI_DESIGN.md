@@ -403,6 +403,30 @@ Save state, selected source, fixity dot plus word, keyboard hints, engine
 mode (`offline, local only`). Reserve for durable status; transient
 feedback goes to toasts.
 
+### 5.12 Batch queue
+Opened from the Sources header (layers icon) or `Ctrl+B`. The dialog lists
+every source with a checkbox; a source can be chosen only when its single
+export would be allowed — hash matches, the chain plans, and a preview (or
+recorded override) exists — and a blocked row says why in the export
+panel's words. Ready rows start checked. One option, **Keep going after a
+failure**, is off by default, so a batch stops at the failed file.
+
+While a batch runs, a strip at the top of the jobs panel shows its phase
+(`Running`, `Cancelling`, `Stopped`, `Complete`), a one-line summary, and
+one row per entry: status word, attempt number, output name, and the
+output hash or the error. Each attempt is also an ordinary job row, so
+progress is the engine's measured progress (`measuring…` when the runner
+has no frame total). Queue rows carry a batch pill under the file name:
+`In batch`, `Rendering`, `Batch done`, `Batch failed`, `Batch cancelled`,
+or `Resume here` on the entry a resume will start at. **Cancel batch**
+stops the running render through the usual `Cancelling` drain and starts
+nothing after it; **Resume at entry N** continues a stopped batch, the
+runner re-verifying and skipping finished entries. A retry writes a new
+`…attemptN` output, so an earlier attempt's proof stays where it is.
+
+The model is `crates/rd-ui/src/batch.rs`; the shell binds it to
+`rd_run::batch::run_batch` (events in, cancel flag out).
+
 ---
 
 ## 6. Interaction and feedback
@@ -568,6 +592,9 @@ visual reference, not the shipping binary.
 | Typography, spacing, layout at 1440/1280/1024/860 logical widths | Designed against §4.3; **not** confirmed by rendering on a display | — |
 | Pixel rendering on a real display or GPU | **Not verified** — no usable browser in the authoring environment | — |
 | Real FFmpeg render through this interface | **Not verified** — the prototype simulates jobs | — |
+| Batch queue model (eligibility, lifecycle, resume point, journal wiring, saved-state restore) | **Pass** — 10 `rd-ui` batch tests; the prototype's `js/model.js` mirror exercised with the same scenarios under Node | `crates/rd-ui/src/batch.rs`; authoring run (script not committed) |
+| Batch queue in the prototype (dialog, strip, queue pills, stop at a simulated failure, resume, complete) | Driven in headless Chromium at 1480 and 820 px: no page errors, focus moves into the dialog and Escape closes it, no horizontal overflow at 820 px; screenshots reviewed by the author | Authoring run (script not committed) |
+| Batch runner against real FFmpeg (CLI) | **Pass** on Linux: stop at a failing entry, resume, verify both outputs | `crates/reeldeck/tests/cli_batch.rs` (ignored by default) |
 
 The three failures the first test run found (a single-match warning list,
 an export gate that read "open" with no chain, and a playhead clamped to
@@ -592,9 +619,11 @@ and cancel flag left to the shipping shell.
 
 1. **Lossless segment export** — the preview range becomes a stream-copy
    cut with its own proof; the trim model does not exist yet.
-2. **Batch queue in the shell** — the runner and resume exist
-   (`rd_run::batch`, `reeldeck batch`); the queue panel still needs to
-   drive it and show per-file state from `BatchState`.
+2. **Batch queue: binding and totals** — the model and prototype exist
+   (§5.12); the shipping shell still has to run `rd_run::batch` on a
+   worker and write the manifest and recipes, and the runner should pass
+   each entry's frame total so batch progress can show a percentage
+   instead of `measuring…`.
 3. **Proxies** — scrubbing long files at full resolution is the next
    performance cliff.
 4. **Framework spike** (§10) and a real-display visual pass.
@@ -603,6 +632,16 @@ and cancel flag left to the shipping shell.
 
 ## Revision history
 
+- **2026-10-29 (fifth revision)** — the batch queue in the shell
+  (§5.12): `rd-ui` gains `batch.rs` — per-source eligibility in the export
+  panel's words, a batch lifecycle (`Running → Cancelling → Stopped /
+  Complete`), the resume point, and saved-state restore — with every
+  attempt recorded as an Export job in the journal and a succeeded entry
+  writing its export evidence back to its source. `export_gate_open_for`
+  and `export_facts_for` answer for any queue row. The prototype mirrors
+  the rules in `js/model.js` and adds the dialog (`Ctrl+B`), the jobs
+  panel strip, queue pills, and a simulated driver with a labelled
+  prototype-only failure switch so stop-and-resume can be seen.
 - **2026-10-27 (fourth revision)** — the model side of the real engine
   binding. `rd-ui` gains a `JobJournal` owning job lifecycle
   (`Queued → Running → Cancelling → terminal`), measured-only progress

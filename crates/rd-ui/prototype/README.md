@@ -50,7 +50,13 @@ python3 -m http.server -d crates/rd-ui/prototype 8080   # optional
    the exact command that would run, the estimate, and the proof sidecars.
 7. **Prove** (`Alt+6`) — after the simulated export: verification rows, the
    sidecars written beside the output, and a determinism comparison.
-8. **Everywhere** — `Ctrl+K` command palette, `?` shortcuts, `Ctrl+,`
+8. **Batch** (`Ctrl+B`, or the layers icon by Sources) — choose sources
+   to render in order. Only sources with a previewed chain and a matching
+   hash can join; the rest say why. Use the prototype-only switch to make
+   one source fail: the batch stops there, the queue marks it
+   `Resume here`, and **Resume** retries it under a new `…attempt2` name
+   before continuing.
+9. **Everywhere** — `Ctrl+K` command palette, `?` shortcuts, `Ctrl+,`
    preferences (density, accent, contrast, motion, time display), `Alt+1`
    … `Alt+6` stages, arrow keys to step frames.
 
@@ -70,6 +76,7 @@ python3 -m http.server -d crates/rd-ui/prototype 8080   # optional
 | `\` · `'` · `Ctrl+1` | Compare · guides · 100 % zoom |
 | `A` · `Alt+↑/↓` · `Delete` · `Alt+Backspace` | Add module · reorder · remove · reset |
 | `Ctrl+Z` · `Ctrl+Shift+Z` (`Ctrl+Y`) | Undo · redo the selected source's chain edits |
+| `Ctrl+B` | Batch render: choose sources, start or resume a batch |
 
 A slider drag or numeric-field focus session is one gesture: all its
 intermediate values collapse into a single undo entry, so one `Ctrl+Z`
@@ -103,6 +110,11 @@ assets/media/           one generated sample frame
   `Simulated in this prototype`; the real shell forwards `rd-run`
   `Progress` blocks and `RunReport` outcomes to the identical state
   machine.
+- **Simulated batch failures.** The batch dialog's failure switch exists
+  only so the stop-and-resume path can be seen; it is labelled as such
+  and is not part of the shell's design. Batch progress shows
+  `measuring…` because, like the real runner today, it reports no frame
+  total.
 - **One sample frame.** Before/after, field split and temporal difference
   are styles over that frame, not decoded video.
 - **No file access.** Adding files and disk-space measurements belong to

@@ -1566,6 +1566,7 @@ fn print_batch_event(event: &rd_run::batch::BatchEvent) {
             index,
             status,
             detail,
+            ..
         } => {
             if *status == rd_core::EntryStatus::Succeeded {
                 println!("[{index}] succeeded: SHA-256 {detail}");

@@ -79,11 +79,13 @@ pub enum BatchEvent {
     },
     /// A measured progress block for the running entry.
     Progress { index: usize, progress: Progress },
-    /// An attempt ended; `detail` is the output hash or the error.
+    /// An attempt ended; `detail` is the output hash or the error, and
+    /// `report` is the run's report when it succeeded.
     Finished {
         index: usize,
         status: EntryStatus,
         detail: String,
+        report: Option<RunReport>,
     },
 }
 
@@ -256,10 +258,13 @@ where
                 }
             })),
         };
+        let mut succeeded_report = None;
         let outcome = match render(&plan.recipes[i], &input, &output, run_opts) {
-            Ok(report) => AttemptOutcome::Succeeded {
-                output_sha256: report.output_sha256,
-            },
+            Ok(report) => {
+                let output_sha256 = report.output_sha256.clone();
+                succeeded_report = Some(report);
+                AttemptOutcome::Succeeded { output_sha256 }
+            }
             Err(RunError::Cancelled) => AttemptOutcome::Cancelled,
             Err(e) => AttemptOutcome::Failed {
                 error: e.to_string(),
@@ -277,6 +282,7 @@ where
             index,
             status,
             detail,
+            report: succeeded_report,
         });
 
         match status {

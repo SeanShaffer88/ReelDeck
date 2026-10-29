@@ -86,6 +86,9 @@
         <button class="icon-btn" id="btn-queue-close" aria-label="Hide source list" title="Hide source list">
           <span data-icon="close" aria-hidden="true"></span>
         </button>
+        <button class="icon-btn" id="btn-batch" data-action="openBatch" aria-label="Batch render sources (Ctrl+B)" title="Batch render — Ctrl+B" aria-haspopup="dialog">
+          <span data-icon="layers" aria-hidden="true"></span>
+        </button>
         <button class="icon-btn" id="btn-add-source" data-action="addSource" aria-label="Add a source file (Ctrl+O)" title="Add source — Ctrl+O">
           <span data-icon="plus" aria-hidden="true"></span>
         </button>
@@ -379,6 +382,34 @@
     </div>
     <div class="dialog-foot">
       <span class="hint">A chain holds at most one of each module; order is render order.</span>
+    </div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim-batch" hidden>
+  <div class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="batch-title" aria-describedby="batch-copy">
+    <div class="dialog-head">
+      <h2 id="batch-title">Batch render</h2>
+      <span class="sub" id="batch-sub"></span>
+      <button class="icon-btn" data-close-dialog="scrim-batch" aria-label="Close">
+        <span data-icon="close" aria-hidden="true"></span>
+      </button>
+    </div>
+    <div class="dialog-body">
+      <p class="batch-copy" id="batch-copy">Renders each chosen source with its own chain, one after another. Every output is a new file with its recipe and export log beside it, and sources are never modified. Progress is saved after every step, so a stopped batch resumes at the file that did not finish.</p>
+      <div id="batch-state"></div>
+      <fieldset class="batch-sources">
+        <legend class="eyebrow">Sources</legend>
+        <div id="batch-list"></div>
+      </fieldset>
+      <div class="batch-options" id="batch-options"></div>
+    </div>
+    <div class="dialog-foot">
+      <span class="hint" id="batch-hint">Simulated in this prototype — no file is written.</span>
+      <span class="spacer"></span>
+      <button class="btn" data-close-dialog="scrim-batch">Cancel</button>
+      <button class="btn" id="batch-resume" hidden>Resume</button>
+      <button class="btn btn-primary" id="batch-start">Start batch</button>
     </div>
   </div>
 </div>
