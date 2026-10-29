@@ -1,0 +1,51 @@
+name: FFmpeg tests
+
+# The render tests are #[ignore]d in the main CI job because they need a
+# real FFmpeg. This workflow installs one on Windows — the primary
+# platform — and runs them. Push a `ci/` branch to try workflow changes
+# before merging.
+on:
+  push:
+    branches: [main, "ci/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-ffmpeg:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install FFmpeg
+        run: |
+          choco install ffmpeg -y --no-progress
+          ffmpeg -hide_banner -version | Select-Object -First 1
+          $needed = 'libx264','libx265','aac','mpeg4','prores_ks','ffv1','flac','pcm_s16le','wmv2','wmav2'
+          $encoders = (ffmpeg -hide_banner -encoders) -join "`n"
+          foreach ($e in $needed) {
+            if ($encoders -notmatch "\s$e\s") { Write-Output "::warning::this FFmpeg build has no $e encoder" }
+          }
+
+      # Windows loads media_kit.dll from beside the executable.
+      - name: Stage MediaKit DLL beside test binaries
+        run: |
+          New-Item -ItemType Directory -Force target/debug/deps, target/debug | Out-Null
+          Copy-Item crates/rd-analyze/native/media_kit.dll target/debug/deps/
+          Copy-Item crates/rd-analyze/native/media_kit.dll target/debug/
+
+      - name: Run the FFmpeg-dependent tests
+        run: |
+          cargo test --workspace -- --ignored --test-threads=1 2>&1 | Tee-Object -FilePath ffmpeg-tests.log
+          $code = $LASTEXITCODE
+          $summary = Select-String -Path ffmpeg-tests.log -Pattern '^test result' | ForEach-Object { $_.Line }
+          Write-Output "::notice title=FFmpeg tests::$($summary -join ' | ')"
+          if ($code -ne 0) {
+            # Failures as annotations, readable without downloading logs.
+            $lines = Select-String -Path ffmpeg-tests.log -Pattern 'panicked at|FAILED|^---- |assertion|left:|right:|Error|error:' -Context 0,3 |
+              Select-Object -First 25 | ForEach-Object { ($_.Line + ' ' + ($_.Context.PostContext -join ' ')) -replace '%','%25' }
+            Write-Output "::error title=FFmpeg tests failed::$($lines -join '%0A')"
+          }
+          exit $code
