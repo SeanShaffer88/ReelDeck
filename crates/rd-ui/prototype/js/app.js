@@ -40,7 +40,6 @@
   }
   var palette = { items: [], index: 0, query: "" };
   var lastFocus = null;
-  var jobSeq = 0;
   var timers = {};
 
   var $ = function (id) { return document.getElementById(id); };
@@ -454,8 +453,10 @@
   // ------------------------------------------------------------------ jobs
   function renderJobs() {
     var wrap = $("jobs");
-    var count = state.jobs.filter(function (j) { return j.state === "running"; }).length;
-    $("jobs-count").textContent = count ? count + " running" : "none running";
+    var count = state.jobs.filter(function (j) {
+      return j.state === "running" || j.state === "cancelling" || j.state === "queued";
+    }).length;
+    $("jobs-count").textContent = count ? count + " active" : "none running";
     var hasAny = state.jobs.length > 0;
     $("jobs-summary").textContent = hasAny
       ? state.jobs[state.jobs.length - 1].label
@@ -466,50 +467,68 @@
 
     var body = $("jobs-body");
     if (!hasAny) {
-      body.innerHTML = '<div class="job-empty">No jobs. Previews and exports run here, off the interface, and can be cancelled at any time.</div>';
+      body.innerHTML = '<div class="job-empty">No jobs. Previews and exports run here, off the interface, with measured progress and cooperative cancellation.</div>';
       return;
     }
     body.innerHTML = state.jobs.map(function (j) {
-      var pct = j.percent == null ? "measuring…" : j.percent + "%";
+      var pct = j.progress && j.progress.percent == null ? "measuring…" : (j.progress ? j.progress.percent + "%" : "measuring…");
+      var right;
+      if (j.state === "running") {
+        right = '<button class="btn btn-sm" data-action="cancel-job" data-job="' + j.id + '">Cancel</button>';
+      } else if (j.state === "cancelling") {
+        right = '<span class="faint" style="font-size:9.5px;min-width:74px;text-align:right">stopping…</span>';
+      } else {
+        right = '<span class="faint" style="font-size:9.5px;min-width:74px;text-align:right">' + U.esc(j.note || M.jobWord(j.state)) + "</span>";
+      }
+      var readout = j.state === "done" || j.state === "failed" || j.state === "cancelled"
+        ? M.jobWord(j.state).toLowerCase()
+        : pct;
       return '<div class="job-row" data-job="' + j.id + '">' +
         '<div class="job-label"><b>' + U.esc(j.label) + '</b>' +
         '<div class="job-sub">' + U.esc(j.sub) + "</div></div>" +
-        '<div class="job-progress"><div class="progress" data-state="' + j.state + '"><span style="width:' + (j.percent || 0) + '%"></span></div>' +
-        '<span class="job-percent">' + (j.state === "done" ? "done" : j.state === "cancelled" ? "cancelled" : j.state === "error" ? "failed" : pct) + "</span></div>" +
-        (j.state === "running"
-          ? '<button class="btn btn-sm" data-action="cancel-job" data-job="' + j.id + '">Cancel</button>'
-          : '<span class="faint" style="font-size:9.5px;min-width:74px;text-align:right">' + U.esc(j.note || "") + "</span>") +
+        '<div class="job-progress"><div class="progress" data-state="' + j.state + '"><span style="width:' + ((j.progress && j.progress.percent) || 0) + '%"></span></div>' +
+        '<span class="job-percent">' + readout + "</span></div>" +
+        right +
         "</div>";
     }).join("");
   }
 
+  // Simulated engine driver: it owns only the clock. Lifecycle, progress
+  // rules and cancellation all live in the model (mirroring JobJournal).
   function startJob(opts) {
-    var id = "job-" + (++jobSeq);
-    var job = {
-      id: id,
+    var id = M.enqueueJob(state, {
       label: opts.label,
       sub: "Simulated in this prototype · " + (opts.sub || "chain as planned"),
-      percent: null,
-      state: "running",
-      note: ""
-    };
-    state.jobs.push(job);
+      kind: opts.kind,
+      totalFrames: opts.totalFrames == null ? null : opts.totalFrames
+    });
+    M.startJobModel(state, id);
     renderJobs();
     announce(opts.label + " started.");
+    var job = state.jobs[state.jobs.length - 1];
     var started = Date.now();
     var duration = opts.duration || 3200;
     var tick = setInterval(function () {
       var elapsed = Date.now() - started;
       var t = Math.min(1, elapsed / duration);
       // Measured-looking curve: fast start, slow tail, like a real render.
-      job.percent = Math.min(99, Math.round((1 - Math.pow(1 - t, 1.8)) * 100));
+      var curve = 1 - Math.pow(1 - t, 1.8);
+      var frames = job.totalFrames ? Math.round(curve * job.totalFrames) : Math.round(curve * 1000);
+      var r = M.jobProgress(state, id, {
+        frame: frames,
+        fps: job.totalFrames ? Math.round((job.totalFrames / duration) * 1300) / 10 : 0,
+        speed: 1,
+        outTimeUs: frames * 40000,
+        totalSize: frames * 1024
+      });
+      if (!r.ok) { clearInterval(tick); delete timers[id]; return; }
       renderJobs();
       if (t >= 1) {
         clearInterval(tick);
         delete timers[id];
-        job.percent = 100;
-        job.state = "done";
-        job.note = opts.doneNote || "complete";
+        M.succeedJob(state, id, opts.outcome || null);
+        var done = state.jobs.find(function (j) { return j.id === id; });
+        if (done) done.note = opts.doneNote || "complete";
         renderJobs();
         announce(opts.label + " finished.");
         if (opts.onDone) opts.onDone();
@@ -522,13 +541,18 @@
   function cancelJob(id) {
     var job = state.jobs.find(function (j) { return j.id === id; });
     if (!job || job.state !== "running") return;
-    clearInterval(timers[id]);
-    delete timers[id];
-    job.state = "cancelled";
-    job.note = "cancelled";
+    M.requestCancel(state, id);
     renderJobs();
-    toast("warn", "Preview cancelled", "No output was written. The partial file was removed.");
-    announce("Job cancelled.");
+    // Cooperative drain: the engine would observe the flag, stop between
+    // frames and remove the partial output before the terminal transition.
+    setTimeout(function () {
+      clearInterval(timers[id]);
+      delete timers[id];
+      M.confirmCancelled(state, id);
+      renderJobs();
+      toast("warn", "Job cancelled", "No output was written. The partial file was removed.");
+      announce("Job cancelled.");
+    }, 220);
   }
 
   // ------------------------------------------------------------------ inspector
@@ -1175,6 +1199,8 @@
     var label = "Preview · " + clip.name + " · " + f.durationShort(state.range.in) + "–" + f.durationShort(state.range.out);
     startJob({
       label: label,
+      kind: "preview",
+      totalFrames: Math.round((state.range.out - state.range.in) * f.fps(clip.rate)),
       sub: "chain as planned · " + state.chain.length + " steps · proof written beside the preview",
       doneNote: "proof written",
       onDone: function () {
@@ -1221,13 +1247,28 @@
     var clip = M.clipMeta(state);
     var preset = D.presets.find(function (p) { return p.id === state.presetId; });
     var estimate = M.estimateBytes(state);
+    var doubleRate = state.chain.some(function (s) {
+      return s.module === "deinterlace" && s.params.outputRate === "send_field";
+    });
+    var totalFrames = Math.round(clip.duration * f.fps(clip.rate) * (doubleRate ? 2 : 1));
+    var sha = fakeHash("out" + Date.now());
     startJob({
       label: "Export · " + basename(state.destination),
+      kind: "export",
+      totalFrames: totalFrames,
+      // Mirrors rd_run::RunReport: the proof the journal records.
+      outcome: {
+        output: state.destination,
+        outputSha256: sha,
+        recipePath: state.destination + ".recipe.json",
+        logPath: state.destination + ".export-log.json",
+        framesProcessed: totalFrames,
+        warnings: []
+      },
       sub: preset.title + " · " + state.chain.length + " steps · simulated",
       duration: 4600,
       doneNote: "proof written",
       onDone: function () {
-        var sha = fakeHash("out" + Date.now());
         state.exported = {
           name: state.destination,
           size: estimate,
@@ -1235,9 +1276,7 @@
           streamSha: fakeHash("streams" + sha),
           sourceSha256: clip.fixity.sha256,
           presetLabel: preset.title,
-          frames: Math.round(clip.duration * f.fps(clip.rate) * (state.chain.some(function (s) {
-            return s.module === "deinterlace" && s.params.outputRate === "send_field";
-          }) ? 2 : 1)),
+          frames: totalFrames,
           verifiedAt: f.clockTime(nowSeconds()).slice(0, 8),
           rerun: null
         };
@@ -1258,6 +1297,7 @@
     }
     startJob({
       label: "Verify · " + basename(state.exported.name),
+      kind: "verify",
       sub: "hashing output and source · simulated",
       duration: 1500,
       doneNote: "all checks pass",
@@ -1273,6 +1313,8 @@
     if (!state.exported) return;
     startJob({
       label: "Re-run · " + basename(state.exported.name),
+      kind: "rerun",
+      totalFrames: state.exported.frames,
       sub: "same recipe beside a new output · simulated",
       duration: 2600,
       doneNote: "streams identical",
@@ -1383,6 +1425,7 @@
     if (!clip) return;
     startJob({
       label: "Fixity · " + clip.name,
+      kind: "fixity",
       sub: "SHA-256 of the source · simulated",
       duration: 1400,
       doneNote: "hash matches",
@@ -1401,6 +1444,8 @@
     }
     startJob({
       label: "Inspect · " + clip.name,
+      kind: "inspect",
+      totalFrames: Math.round(clip.duration * f.fps(clip.rate)),
       sub: "signal, anomalies, idet · simulated",
       duration: 2200,
       doneNote: "report written",

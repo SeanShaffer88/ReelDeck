@@ -26,6 +26,7 @@
 
 pub mod chain;
 pub mod format;
+pub mod jobs;
 pub mod prefs;
 pub mod shortcuts;
 pub mod stages;
@@ -41,6 +42,9 @@ pub use chain::{
     ChainEditError, CheckLevel, ExportFacts, ModuleId, PreflightCheck,
 };
 pub use format::{bytes_human, clock_time, duration, FrameRate};
+pub use jobs::{
+    JobError, JobId, JobJournal, JobKind, JobOutcome, JobProgress, JobRecord, JobStatus,
+};
 pub use prefs::{Accent, Density, TimeDisplay, WorkspacePrefs};
 pub use stages::{Stage, StageAccess};
 pub use timeline::{MarkKind, MetricLane, RangeSelection, TimelineMark, TimelineModel};
@@ -392,7 +396,11 @@ pub struct ShellModel {
     pub sources: Vec<SourceState>,
     pub selected: Option<usize>,
     pub viewer: ViewerState,
-    pub jobs: Vec<JobSummary>,
+    /// Background renders and checks: lifecycle, measured progress,
+    /// cancellation and outcomes. The shell binds `rd-run`'s callbacks
+    /// to this journal; it spawns no process itself.
+    #[serde(default)]
+    pub journal: JobJournal,
     /// Where the operator is in the workflow.
     #[serde(default)]
     pub stage: Stage,
@@ -742,6 +750,83 @@ impl ShellModel {
             self.timeline.rate,
             self.prefs.time_display,
         )
+    }
+
+    // ------------------------------------------------------------- jobs
+    //
+    // These are the model side of the engine binding: the shipping shell
+    // calls `enqueue_job`/`start_job` around its worker, forwards each
+    // `rd_run::Progress` block to `apply_job_progress`, flips
+    // `RunOptions.cancel` when `request_job_cancel` succeeds, and closes
+    // the job with the engine's result.
+
+    /// Accept a job for the currently selected source. The frame total,
+    /// when known, lets measured progress become a percentage.
+    pub fn enqueue_job(
+        &mut self,
+        label: impl Into<String>,
+        kind: JobKind,
+        total_frames: Option<u64>,
+    ) -> JobId {
+        self.journal
+            .enqueue(label, kind, self.selected, total_frames)
+    }
+
+    /// A worker took the job.
+    pub fn start_job(&mut self, id: JobId) -> Result<(), JobError> {
+        self.journal.start(id)
+    }
+
+    /// Forward one measured engine block; estimates are never inserted.
+    pub fn apply_job_progress(
+        &mut self,
+        id: JobId,
+        progress: &rd_run::Progress,
+    ) -> Result<(), JobError> {
+        self.journal.apply_progress(id, progress)
+    }
+
+    /// Request cooperative cancellation. The binding layer sets the
+    /// engine's cancel flag when this returns `Ok`.
+    pub fn request_job_cancel(&mut self, id: JobId) -> Result<(), JobError> {
+        self.journal.request_cancel(id)
+    }
+
+    /// Close a successful run and write its evidence back to the job's
+    /// source: a preview satisfies the preview gate, and an export names
+    /// the output the Prove stage reads.
+    pub fn job_succeeded(&mut self, id: JobId, report: &rd_run::RunReport) -> Result<(), JobError> {
+        let record = self.journal.get(id).cloned();
+        self.journal.succeed(id, report)?;
+        if let Some(record) = record {
+            if let Some(index) = record.source_index {
+                if let Some(source) = self.sources.get_mut(index) {
+                    match record.kind {
+                        JobKind::Preview => source.previewed = true,
+                        JobKind::Export => {
+                            source.exported_output = Some(report.output.display().to_string())
+                        }
+                        JobKind::Verify | JobKind::Rerun | JobKind::Fixity | JobKind::Inspect => {}
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Close a failed run. No source evidence changes on failure.
+    pub fn job_failed(&mut self, id: JobId, detail: impl Into<String>) -> Result<(), JobError> {
+        self.journal.fail(id, detail)
+    }
+
+    /// The engine confirmed cancellation and removed its partial output.
+    pub fn job_confirmed_cancelled(&mut self, id: JobId) -> Result<(), JobError> {
+        self.journal.confirm_cancelled(id)
+    }
+
+    /// The bottom panel's job rows, oldest first.
+    pub fn job_summaries(&self) -> Vec<JobSummary> {
+        self.journal.summaries()
     }
 }
 
@@ -1504,5 +1589,158 @@ mod tests {
             Operation::Denoise { temporal, .. } => assert_eq!(*temporal, 3.0),
             other => panic!("expected denoise, got {other:?}"),
         }
+    }
+
+    fn run_report(name: &str) -> rd_run::RunReport {
+        rd_run::RunReport {
+            output: std::path::PathBuf::from(format!("D:/out/{name}")),
+            output_sha256: "b".repeat(64),
+            frames_processed: 250,
+            recipe_path: std::path::PathBuf::from(format!("D:/out/{name}.recipe.json")),
+            log_path: std::path::PathBuf::from(format!("D:/out/{name}.export-log.json")),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_successful_preview_job_opens_the_export_gate_for_its_source() {
+        let mut shell = chain_model();
+        // The sample chain carries a send_field deinterlace but no
+        // aggressive gate; give the source a gated chain to prove the
+        // preview evidence does the work.
+        shell.sources[0].previewed = false;
+        assert!(!shell.stage_access(Stage::Export).available);
+
+        let id = shell.enqueue_job("Preview · capture_1987", JobKind::Preview, Some(250));
+        shell.start_job(id).expect("started");
+        shell
+            .apply_job_progress(
+                id,
+                &rd_run::Progress {
+                    frame: 100,
+                    ..rd_run::Progress::default()
+                },
+            )
+            .expect("progress");
+        assert_eq!(shell.job_summaries()[0].percent, Some(40));
+        shell
+            .job_succeeded(id, &run_report("preview.mkv"))
+            .expect("done");
+
+        assert!(
+            shell.sources[0].previewed,
+            "the preview evidence is recorded"
+        );
+        assert!(shell.stage_access(Stage::Export).available);
+        assert_eq!(shell.journal.records()[0].status.word(), "Done");
+    }
+
+    #[test]
+    fn a_successful_export_job_names_the_output_for_prove() {
+        let mut shell = chain_model();
+        let id = shell.enqueue_job("Export · capture_1987", JobKind::Export, None);
+        shell.start_job(id).unwrap();
+        // No frame total: progress stays honestly unmeasured.
+        shell
+            .apply_job_progress(
+                id,
+                &rd_run::Progress {
+                    frame: 900,
+                    ..rd_run::Progress::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(shell.job_summaries()[0].percent, None);
+        shell
+            .job_succeeded(id, &run_report("capture.restored.mkv"))
+            .unwrap();
+
+        assert_eq!(
+            shell.sources[0].exported_output.as_deref(),
+            Some("D:/out/capture.restored.mkv")
+        );
+        assert!(shell.stage_access(Stage::Prove).available);
+    }
+
+    #[test]
+    fn failed_and_cancelled_jobs_leave_source_evidence_untouched() {
+        let mut shell = chain_model();
+        let failed = shell.enqueue_job("Export", JobKind::Export, Some(10));
+        shell.start_job(failed).unwrap();
+        shell
+            .job_failed(failed, "render failed: exit status 1")
+            .unwrap();
+        assert!(shell.sources[0].exported_output.is_none());
+        assert!(!shell.sources[0].previewed);
+
+        let cancelled = shell.enqueue_job("Preview", JobKind::Preview, Some(10));
+        shell.start_job(cancelled).unwrap();
+        shell.request_job_cancel(cancelled).unwrap();
+        assert!(matches!(
+            shell.journal.get(cancelled).unwrap().status,
+            JobStatus::Cancelling(_)
+        ));
+        shell.job_confirmed_cancelled(cancelled).unwrap();
+        assert!(
+            !shell.sources[0].previewed,
+            "a cancelled preview proves nothing"
+        );
+        assert_eq!(shell.journal.records().len(), 2);
+        // The cancel flag is the engine's; the model only records intent.
+        assert!(shell.job_summaries().iter().all(|row| !row.cancellable));
+    }
+
+    #[test]
+    fn journal_progress_is_measured_only_and_unknown_ids_are_refused() {
+        let mut shell = ShellModel::new();
+        let unknown = JobId(42);
+        assert!(shell.start_job(unknown).is_err());
+        assert!(shell
+            .apply_job_progress(unknown, &rd_run::Progress::default())
+            .is_err());
+        assert!(shell.request_job_cancel(unknown).is_err());
+
+        shell.add_to_queue("a.mkv");
+        let id = shell.enqueue_job("Fixity · a.mkv", JobKind::Fixity, None);
+        // Progress before the worker starts is an illegal transition.
+        assert!(shell
+            .apply_job_progress(id, &rd_run::Progress::default())
+            .is_err());
+        shell.start_job(id).unwrap();
+        shell
+            .apply_job_progress(
+                id,
+                &rd_run::Progress {
+                    frame: 12,
+                    fps: 25.0,
+                    speed: 0.9,
+                    ..rd_run::Progress::default()
+                },
+            )
+            .unwrap();
+        match &shell.journal.records()[0].status {
+            JobStatus::Running(progress) => {
+                assert_eq!(progress.frames_processed, 12);
+                assert_eq!(progress.fps, 25.0);
+                assert_eq!(progress.speed, 0.9);
+                assert_eq!(progress.percent, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn shell_state_without_a_journal_still_deserializes() {
+        // A saved shell from before the journal existed has no field;
+        // serde defaults give an empty journal rather than failing.
+        let json = concat!(
+            r#"{"queue":[{"name":"old.mkv","fixity":"pending","inspect":"not_inspected"}],"#,
+            r#""selected":null,"viewer":{"current_frame":0,"mode":"program","#,
+            r#""showing_before":false,"compare":false,"zoom_100":false},"jobs":[],"#,
+            r#""stage":"ingest"}"#
+        );
+        let back: ShellModel = serde_json::from_str(json).expect("legacy state deserializes");
+        assert!(back.journal.is_empty());
+        assert!(back.job_summaries().is_empty());
     }
 }

@@ -419,9 +419,16 @@ feedback goes to toasts.
 - **Irreversible actions.** Exports confirm with facts; deletes are
   recoverable (the removed step is returned for undo). Sources are never
   written to, so no action can destroy one.
-- **Progress honesty.** A job shows `measuring…` until the engine reports
-  a rate, then a percentage; cancel stops the run and removes the partial
-  output, and the log records the cancellation.
+- **Progress honesty.** Every job moves through one explicit lifecycle —
+  `Queued → Running`, then `Succeeded`, `Failed`, or `Cancelled` after a
+  visible `Cancelling` drain. Progress is measured only: the panel renders
+  `measuring…` until a frame total is known, then frames reported as a
+  percentage of that total, never an estimate or interpolated curve.
+  Cancellation is cooperative — the shell sets the engine's cancel flag,
+  the engine stops between frames and removes the partial output, and the
+  log records it; illegal lifecycle requests are returned as errors, never
+  silently ignored. The journal keeps the last 100 entries, evicting the
+  oldest terminal row and never an active one.
 - **Undo.** The model keeps a per-source undo/redo history of chain edits
   (bounded at 100 entries). Every edit snapshots the recipe first, so an
   undo restores the exact operation including its parameters; refused
@@ -576,23 +583,39 @@ described as production-ready.
 Done since the first version: per-source recipes and evidence in
 `ShellModel` (one `SourceState` per queue row, parallel to the queue); a
 per-source undo/redo history over chain edits, mirrored by the
-prototype's history controls and chords; and gesture coalescing, so a
-slider drag or numeric-field session collapses into one undo entry.
+prototype's history controls and chords; gesture coalescing, so a
+slider drag or numeric-field session collapses into one undo entry; and
+the model side of the real engine binding — a `JobJournal` in `rd-ui`
+that consumes `rd-run`'s exact `Progress` blocks and `RunReport`
+outcomes behind the lifecycle described in §6, with the worker thread
+and cancel flag left to the shipping shell.
 
-1. **Real engine binding** — progress, cancellation and job journal from
-   `rd-run`; the interface is drawn around those exact callbacks.
-2. **Lossless segment export** — the preview range becomes a stream-copy
+1. **Lossless segment export** — the preview range becomes a stream-copy
    cut with its own proof; the trim model does not exist yet.
-3. **Batch queue** — per-file state transitions already gated; needs a
+2. **Batch queue** — per-file state transitions already gated; needs a
    queue runner and resume.
-4. **Proxies** — scrubbing long files at full resolution is the next
+3. **Proxies** — scrubbing long files at full resolution is the next
    performance cliff.
-5. **Framework spike** (§10) and a real-display visual pass.
+4. **Framework spike** (§10) and a real-display visual pass.
 
 ---
 
 ## Revision history
 
+- **2026-10-27 (fourth revision)** — the model side of the real engine
+  binding. `rd-ui` gains a `JobJournal` owning job lifecycle
+  (`Queued → Running → Cancelling → terminal`), measured-only progress
+  built directly from `rd_run::Progress` blocks (a percentage exists
+  only with a known nonzero frame total, clamped at 100; otherwise
+  `measuring…`), cooperative cancellation whose `Arc<AtomicBool>` flag
+  stays in the binding layer, and proof-bearing `JobOutcome`s converted
+  from `rd_run::RunReport`, retained under a 100-entry cap that never
+  evicts an active job. Only a succeeded Preview or Export writes
+  evidence back to its source (the preview gate opens; the output is
+  named for Prove); failed and cancelled jobs change nothing. The
+  prototype's job panel and simulated driver now run the same state
+  machine in `js/model.js`, including the Cancelling drain and the
+  six lifecycle words.
 - **2026-10-27 (third revision)** — continuous-gesture coalescing:
   `ShellModel::begin_gesture` hands out `GestureId`s, and parameter
   replacements tagged with the same id collapse into one undo entry,

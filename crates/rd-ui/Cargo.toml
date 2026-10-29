@@ -11,6 +11,11 @@ description = "ReelDeck user-interface state model and the framework-neutral she
 rd-core = { path = "../rd-core", version = "0.1.0" }
 rd-analyze = { path = "../rd-analyze", version = "0.1.0" }
 rd-pipeline = { path = "../rd-pipeline", version = "0.1.0" }
+# Consumes rd-run's exact Progress callback payload and RunReport outcome
+# types rather than re-deriving them, so the job journal cannot disagree
+# with the executor's contract. No new external dependency: rd-run shares
+# the same serde/thiserror set and does not depend back on rd-ui.
+rd-run = { path = "../rd-run", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
