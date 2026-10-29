@@ -24,7 +24,7 @@ pub use batch::{
 pub use hash::{is_sha256_hex, sha256_digest, sha256_file, sha256_hex, Sha256};
 pub use log::ExportLog;
 pub use recipe::{
-    CropRect, DeinterlaceEngine, DenoiseEngine, ExportPreset, FieldOrder, Operation, OutputRate,
-    Recipe, RecipeError, RECIPE_SCHEMA_VERSION,
+    parse_time, CropRect, DeinterlaceEngine, DenoiseEngine, ExportPreset, FieldOrder, KeepRange,
+    Operation, OutputRate, Recipe, RecipeError, MIN_RECIPE_SCHEMA_VERSION, RECIPE_SCHEMA_VERSION,
 };
 pub use verify::{verify_export, Check, CheckStatus, VerificationReport};

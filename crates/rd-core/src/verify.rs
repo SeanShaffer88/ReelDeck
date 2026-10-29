@@ -285,7 +285,7 @@ mod tests {
 
     fn fixture_log() -> ExportLog {
         let mut log = ExportLog::new(
-            1,
+            crate::recipe::RECIPE_SCHEMA_VERSION,
             "capture.mkv",
             SRC,
             "capture.restored.mkv",
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn schema_disagreement_fails_schema_match_only() {
         let mut recipe = fixture_recipe();
-        recipe.schema_version = 2;
+        recipe.schema_version = 1;
         let report = verify_export(&fixture_log(), &recipe, Some(SRC), Some(OUT));
         assert_eq!(check(&report, "schema_match").status, CheckStatus::Fail);
         assert_eq!(report.failed(), 1);

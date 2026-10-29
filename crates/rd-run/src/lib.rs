@@ -417,15 +417,58 @@ fn write_new_file(path: &Path, contents: &str) -> std::io::Result<()> {
 
 /// Plan a recipe and run the export end to end. See [`run_plan`] for
 /// the execution semantics shared with previews.
+///
+/// Cuts need facts the recipe does not carry, gathered here before the
+/// plan is built: whether the source has audio (when several ranges are
+/// joined in one file), and, for a lossless cut, the keyframe the copy
+/// will really start on — recorded in the export log beside the
+/// requested start, so the snap is part of the proof.
 pub fn run_export(
     recipe: &Recipe,
     input: &Path,
     output: &Path,
     opts: RunOptions,
 ) -> Result<RunReport, RunError> {
-    let plan =
-        rd_pipeline::export_plan(recipe, &input.to_string_lossy(), &output.to_string_lossy())?;
-    run_plan(plan, recipe, input, output, opts)
+    let stream_copy = recipe.export_preset == rd_core::ExportPreset::StreamCopy;
+    let mut facts = rd_pipeline::SourceFacts::default();
+    if recipe.keep.len() > 1 && !stream_copy && input.exists() {
+        facts.has_audio = rd_analyze::probe(input)
+            .ok()
+            .map(|probe| probe.streams.iter().any(|s| s.codec_type == "audio"));
+    }
+    let plan = rd_pipeline::export_plan_with_facts(
+        recipe,
+        &input.to_string_lossy(),
+        &output.to_string_lossy(),
+        &facts,
+    )?;
+    let mut notes = Vec::new();
+    if let ([range], true) = (recipe.keep.as_slice(), stream_copy) {
+        if range.start_secs > 0.0 && input.exists() {
+            notes.push(keyframe_note(input, range.start_secs));
+        }
+    }
+    run_plan_noted(plan, recipe, input, output, opts, notes)
+}
+
+/// What the log says about where a lossless cut requested at `start`
+/// really begins.
+fn keyframe_note(input: &Path, start: f64) -> String {
+    match rd_analyze::keyframe_at_or_before(input, start) {
+        Ok(Some(k)) if (start - k).abs() < 1e-6 => format!(
+            "lossless cut: requested start {start}s falls on a keyframe; the copy starts exactly there"
+        ),
+        Ok(Some(k)) => format!(
+            "lossless cut: requested start {start}s; the copy starts at the keyframe at {k}s, {:.3}s earlier",
+            start - k
+        ),
+        Ok(None) => format!(
+            "lossless cut: requested start {start}s; no keyframe was found in the 60s before it, so the real start is unknown"
+        ),
+        Err(e) => format!(
+            "lossless cut: requested start {start}s; the keyframe it snaps to could not be read: {e}"
+        ),
+    }
 }
 
 /// Run an already-built plan (an export plan, or a preview plan from
@@ -455,7 +498,20 @@ pub fn run_plan(
     recipe: &Recipe,
     input: &Path,
     output: &Path,
+    opts: RunOptions,
+) -> Result<RunReport, RunError> {
+    run_plan_noted(plan, recipe, input, output, opts, Vec::new())
+}
+
+/// [`run_plan`] with notes measured before the run (for example a lossless
+/// cut's real start) recorded in the log after the plan's own notices.
+fn run_plan_noted(
+    plan: ExportPlan,
+    recipe: &Recipe,
+    input: &Path,
+    output: &Path,
     mut opts: RunOptions,
+    notes: Vec<String>,
 ) -> Result<RunReport, RunError> {
     let started_at = now_iso8601_utc();
     let (recipe_path, log_path) = sidecar_paths(output);
@@ -495,7 +551,8 @@ pub fn run_plan(
     };
 
     // -- Stabilization pass 1 ----------------------------------------
-    let mut extra_warnings: Vec<String> = Vec::new();
+    let mut extra_warnings: Vec<String> = plan.notices.clone();
+    extra_warnings.extend(notes);
     if let Some(stab) = &plan.stabilization {
         if Path::new(&stab.transforms_file).exists() {
             extra_warnings.push(format!(

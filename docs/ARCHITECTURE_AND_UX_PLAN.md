@@ -161,11 +161,17 @@ order, with every parameter, re-runnable, and proved.
   range, run as a batch so each part has its own proof.
   - **Two cut modes, never confused.** *Frame-accurate* cuts re-encode
     and can carry the restoration chain. *Lossless* cuts copy the streams
-    untouched, so they can only fall on keyframes: the planner snaps each
-    range to the keyframe at or before its start, says so before the run,
-    and records the snapped times in the log. A lossless cut cannot carry
-    filters; the planner refuses that combination instead of re-encoding
-    silently.
+    untouched (the *stream copy* intent), so they can only fall on
+    keyframes: the plan says so before the run, and the executor looks
+    up the keyframe the copy really starts on and records it beside the
+    requested start in the log. A lossless cut cannot carry filters; the
+    recipe is refused instead of re-encoding silently. A lossless cut
+    keeps one range per file for now; several ranges in one lossless
+    file would need keyframe-aligned joins and are refused with a pointer
+    to *split*.
+  - **Cuts and stabilization don't mix in one render.** The analysis pass
+    measures the whole source, so a cut render would apply the wrong
+    frames' motion; stabilize first, then cut the stabilized output.
 - **Join and merge.** Several sources (AVI, MP4, MOV, MKV, ASF and
   anything else FFmpeg demuxes) into one output, in order. Every source
   is pinned by its own SHA-256 in the recipe. Sources whose streams match
@@ -236,7 +242,7 @@ rd-pipeline   Filter-graph / VapourSynth-script planning, two-pass
 rd-ui         Shell state model (queue / viewer / chain / jobs); no
               framework code yet — see the GUI decision below
 reeldeck      CLI binary: inspect | plan | export | preview | verify |
-              rerun | batch | hash | version
+              rerun | batch | cut | split | hash | version
 ```
 
 - **Engine:** FFmpeg (a pinned build; note that the stabilization library

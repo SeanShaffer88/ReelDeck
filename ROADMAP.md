@@ -50,17 +50,21 @@ engine, under the same proof rules (plan §3.7–§3.10).
 
 ## v0.4 — Cut, join, convert
 
-- Trim to a range, remove unwanted parts (keep several ranges), and split
-  into one output per range — frame-accurate (re-encode, can carry the
-  restoration chain) and lossless (stream copy, keyframe-snapped, stated
-  before the run and recorded in the log)
+- [x] Trim to a range, remove unwanted parts (keep several ranges), and
+  split into one output per range — frame-accurate (re-encode, can carry
+  the restoration chain) and lossless (stream copy, keyframe-snapped,
+  stated before the run and recorded in the log): `reeldeck cut`,
+  `reeldeck split`. Several ranges in one lossless file are not yet
+  supported
 - Join / merge several sources (AVI, MP4, MOV, MKV, ASF, …) into one
   output, each source pinned by hash; lossless when streams match
 - Format conversion between containers and codecs, with resolution,
   frame rate and bitrate/quality settings; incompatible combinations
   refused with the reason
 - Metadata editing (title, description, tags)
-- Recipe schema 2 for edit operations; schema-1 recipes keep working
+- [x] Recipe schema 2 for edit operations; schema-1 recipes keep working
+- Lossless remux into another container (the stream-copy intent with no
+  ranges) exists; codec conversion with output settings does not yet
 - Batch queue: copy settings across sources
 - Proxy media for scrubbing long captures
 - Chapter and attachment preservation for Matroska masters

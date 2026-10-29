@@ -39,6 +39,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Cutting, trimming and splitting (first v0.4 slice). Recipe schema 2
+  adds `keep` ranges (trim = one range; several remove the parts between
+  them; an open end keeps to the end of the source) and the stream-copy
+  intent (`ExportPreset::StreamCopy`: streams copied untouched, no
+  operations allowed; with no ranges it is a lossless remux). Schema-1
+  recipes still load and re-run; a schema-1 recipe carrying an edit
+  field is refused. The planner cuts frame-accurately for re-encoding
+  intents (input seeking for one range; trim/atrim + concat in one
+  filter graph for several, which needs `SourceFacts::has_audio`) and
+  losslessly for stream copy (one range per file, keyframe-snapped).
+  `ExportPlan::notices` state such caveats before a run and are copied
+  into the export log; for a lossless cut the executor also records the
+  keyframe the copy really starts on (`rd_analyze::keyframe_at_or_before`).
+  Cuts combined with stabilization are refused. New CLI commands:
+  `reeldeck cut <file> --keep A-B … (--lossless | --preset <name>)` and
+  `reeldeck split <file> --at T … (--lossless | --preset <name>)`, which
+  writes per-part recipes and a manifest and runs them as a resumable
+  batch. `reeldeck plan` prints the notices and probes for audio when a
+  plan needs it. `rd_core::parse_time` reads seconds or `h:mm:ss`. No new
+  dependency.
+
 - Batch progress as a percentage. Before each entry renders, the batch
   runner states how many frames it should write —
   `rd_run::batch::probed_frame_total`: the input's frame count from

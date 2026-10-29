@@ -22,6 +22,11 @@
 //!   reeldeck batch <manifest.json> Render a manifest's recipes in
 //!                                 order; a stopped batch resumes at
 //!                                 the entry that did not finish
+//!   reeldeck cut <file> --keep <a>-<b>
+//!                                 Keep one or more ranges of a file
+//!                                 (lossless or frame-accurate)
+//!   reeldeck split <file> --at <t> Split a file into parts, each
+//!                                 rendered with its own proof
 //!   reeldeck hash <file>          Print the file's SHA-256
 //!   reeldeck version              Print the version
 
@@ -45,6 +50,8 @@ fn main() -> ExitCode {
         Some("verify") => cmd_verify(&args[1..]),
         Some("rerun") => cmd_rerun(&args[1..]),
         Some("batch") => cmd_batch(&args[1..]),
+        Some("cut") => cmd_cut(&args[1..]),
+        Some("split") => cmd_split(&args[1..]),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_usage();
             0
@@ -95,6 +102,16 @@ fn print_usage() {
          \x20                               at the entry that did not finish. Stops at the\n\
          \x20                               first failure unless --keep-going; --status\n\
          \x20                               prints the saved state without rendering\n\
+         \x20 reeldeck cut <file> --keep <start>-<end> [--keep …] (--lossless | --preset <name>) [--out <file>]\n\
+         \x20                               Keep ranges of a file (times in seconds or h:mm:ss;\n\
+         \x20                               <start>- keeps to the end). --lossless copies the\n\
+         \x20                               streams untouched (one range; the start snaps to a\n\
+         \x20                               keyframe, recorded in the log). --preset preservation|\n\
+         \x20                               mezzanine|access re-encodes and cuts frame-accurately\n\
+         \x20 reeldeck split <file> --at <time> [--at …] (--lossless | --preset <name>) [--dir <folder>]\n\
+         \x20                               Split into parts at the given times, run as a batch\n\
+         \x20                               in <stem>.split/ so each part has its own proof;\n\
+         \x20                               the same command again resumes an unfinished split\n\
          \x20 reeldeck hash <file>          Print the file's SHA-256\n\
          \x20 reeldeck version              Print the version"
     );
@@ -636,8 +653,19 @@ fn cmd_plan(args: &[String]) -> i32 {
         }
     };
     let output = derived_output_path(&recipe.source_name, recipe.export_preset);
-    match rd_pipeline::export_plan(&recipe, &recipe.source_name, &output) {
+    // Joining several kept ranges needs to know whether there is audio;
+    // ask the source when it is reachable.
+    let mut facts = rd_pipeline::SourceFacts::default();
+    if recipe.keep.len() > 1 {
+        if let Ok(probe) = rd_analyze::probe(Path::new(&recipe.source_name)) {
+            facts.has_audio = Some(probe.streams.iter().any(|s| s.codec_type == "audio"));
+        }
+    }
+    match rd_pipeline::export_plan_with_facts(&recipe, &recipe.source_name, &output, &facts) {
         Ok(plan) => {
+            for notice in &plan.notices {
+                println!("# note: {notice}");
+            }
             if let Some(stab) = &plan.stabilization {
                 println!("# pass 1 (stabilization analysis) must run first:");
                 println!("{}", stab.pass1_args.join(" "));
@@ -1422,6 +1450,317 @@ fn print_version_comparison(recorded: &rd_core::ExportLog, new_log: Option<&rd_c
     }
 }
 
+const CUT_USAGE: &str =
+    "reeldeck cut <file> --keep <start>-<end> [--keep …] (--lossless | --preset <preservation|mezzanine|access>) [--out <file>]";
+const SPLIT_USAGE: &str =
+    "reeldeck split <file> --at <time> [--at …] (--lossless | --preset <preservation|mezzanine|access>) [--dir <folder>]";
+
+/// Shared flags of `cut` and `split`.
+struct EditArgs {
+    input: PathBuf,
+    ranges: Vec<rd_core::KeepRange>,
+    points: Vec<f64>,
+    preset: rd_core::ExportPreset,
+    out: Option<PathBuf>,
+}
+
+/// `12-30`, `1:00-1:30.5`, or `90-` (to the end of the source).
+fn parse_keep_arg(raw: &str) -> Option<rd_core::KeepRange> {
+    let (start, end) = raw.split_once('-')?;
+    let start = rd_core::parse_time(start)?;
+    let end = if end.trim().is_empty() {
+        None
+    } else {
+        Some(rd_core::parse_time(end)?)
+    };
+    Some(rd_core::KeepRange::new(start, end))
+}
+
+fn parse_preset_name(raw: &str) -> Option<rd_core::ExportPreset> {
+    match raw {
+        "preservation" => Some(rd_core::ExportPreset::PreservationMaster),
+        "mezzanine" => Some(rd_core::ExportPreset::Mezzanine),
+        "access" => Some(rd_core::ExportPreset::Access),
+        _ => None,
+    }
+}
+
+fn parse_edit_args(args: &[String], cmd: &str, usage: &str) -> Result<EditArgs, u8> {
+    let fail = |msg: String| {
+        eprintln!("reeldeck {cmd}: {msg}");
+        eprintln!("usage: {usage}");
+        2u8
+    };
+    let mut input = None;
+    let mut ranges = Vec::new();
+    let mut points = Vec::new();
+    let mut lossless = false;
+    let mut preset = None;
+    let mut out = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        let mut value = || {
+            i += 1;
+            args.get(i)
+                .cloned()
+                .ok_or_else(|| fail(format!("missing value for {arg}")))
+        };
+        match arg {
+            "--keep" if cmd == "cut" => {
+                let v = value()?;
+                ranges.push(parse_keep_arg(&v).ok_or_else(|| {
+                    fail(format!(
+                        "--keep expects <start>-<end> in seconds or h:mm:ss, got '{v}'"
+                    ))
+                })?);
+            }
+            "--at" if cmd == "split" => {
+                let v = value()?;
+                points.push(rd_core::parse_time(&v).ok_or_else(|| {
+                    fail(format!(
+                        "--at expects a time in seconds or h:mm:ss, got '{v}'"
+                    ))
+                })?);
+            }
+            "--lossless" => lossless = true,
+            "--preset" => {
+                let v = value()?;
+                preset = Some(parse_preset_name(&v).ok_or_else(|| {
+                    fail(format!(
+                        "--preset expects preservation, mezzanine or access, got '{v}'"
+                    ))
+                })?);
+            }
+            "--out" if cmd == "cut" => out = Some(PathBuf::from(value()?)),
+            "--dir" if cmd == "split" => out = Some(PathBuf::from(value()?)),
+            flag if flag.starts_with("--") => return Err(fail(format!("unknown flag '{flag}'"))),
+            _ if input.is_some() => return Err(fail(format!("unexpected extra argument '{arg}'"))),
+            _ => input = Some(PathBuf::from(arg)),
+        }
+        i += 1;
+    }
+    let input = input.ok_or_else(|| fail("name the source file".to_string()))?;
+    let preset = match (lossless, preset) {
+        (true, None) => rd_core::ExportPreset::StreamCopy,
+        (false, Some(p)) => p,
+        (true, Some(_)) => {
+            return Err(fail(
+                "choose one: --lossless copies the streams, --preset re-encodes".to_string(),
+            ))
+        }
+        (false, None) => {
+            return Err(fail(
+                "choose how to cut: --lossless (streams copied untouched; starts snap to keyframes) or --preset <name> (frame-accurate; re-encoded)".to_string(),
+            ))
+        }
+    };
+    if cmd == "cut" && ranges.is_empty() {
+        return Err(fail("give at least one --keep range".to_string()));
+    }
+    if cmd == "split" && points.is_empty() {
+        return Err(fail("give at least one --at split point".to_string()));
+    }
+    Ok(EditArgs {
+        input,
+        ranges,
+        points,
+        preset,
+        out,
+    })
+}
+
+/// The recipe for an edit of `input`, its source pinned by hash.
+fn edit_recipe(
+    cmd: &str,
+    input: &Path,
+    source_sha256: &str,
+    preset: rd_core::ExportPreset,
+    ranges: Vec<rd_core::KeepRange>,
+) -> Result<rd_core::Recipe, i32> {
+    let mut recipe = rd_core::Recipe::new(input.display().to_string(), preset);
+    recipe.source_sha256 = Some(source_sha256.to_string());
+    recipe.keep = ranges;
+    recipe.notes = format!("written by reeldeck {cmd}");
+    recipe.validate().map_err(|e| {
+        eprintln!("reeldeck {cmd}: {e}");
+        2
+    })?;
+    Ok(recipe)
+}
+
+fn hash_source(cmd: &str, input: &Path) -> Result<String, i32> {
+    if !input.exists() {
+        eprintln!(
+            "reeldeck {cmd}: input file does not exist: {}",
+            input.display()
+        );
+        return Err(1);
+    }
+    rd_core::sha256_file(input).map_err(|e| {
+        eprintln!("reeldeck {cmd}: cannot hash {}: {e}", input.display());
+        1
+    })
+}
+
+fn cmd_cut(args: &[String]) -> i32 {
+    let parsed = match parse_edit_args(args, "cut", CUT_USAGE) {
+        Ok(p) => p,
+        Err(c) => return c as i32,
+    };
+    let sha = match hash_source("cut", &parsed.input) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let recipe = match edit_recipe("cut", &parsed.input, &sha, parsed.preset, parsed.ranges) {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+    let output = parsed.out.unwrap_or_else(|| {
+        PathBuf::from(edited_output_path(
+            &parsed.input,
+            "cut",
+            None,
+            parsed.preset,
+        ))
+    });
+    execute_run("cut", &recipe, &parsed.input, &output, None)
+}
+
+/// `capture.mkv` → `capture.cut.mkv` / `capture.part02.mkv`, with the
+/// preset's extension.
+fn edited_output_path(
+    input: &Path,
+    tag: &str,
+    part: Option<usize>,
+    preset: rd_core::ExportPreset,
+) -> String {
+    let stem = input
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    match part {
+        Some(n) => format!("{stem}.{tag}{n:02}.{}", preset.extension()),
+        None => format!("{stem}.{tag}.{}", preset.extension()),
+    }
+}
+
+/// Split points into consecutive ranges: `[0, a]`, `[a, b]`, …, `[z, end]`.
+fn split_ranges(points: &[f64]) -> Result<Vec<rd_core::KeepRange>, String> {
+    let mut ranges = Vec::with_capacity(points.len() + 1);
+    let mut start = 0.0;
+    for &p in points {
+        if p <= start {
+            return Err(format!(
+                "split points must be greater than 0 and increasing; {p}s does not come after {start}s"
+            ));
+        }
+        ranges.push(rd_core::KeepRange::new(start, Some(p)));
+        start = p;
+    }
+    ranges.push(rd_core::KeepRange::new(start, None));
+    Ok(ranges)
+}
+
+/// Write `contents` to `path` as a new file, or accept an existing file
+/// with exactly these contents (a re-run of the same split). A different
+/// existing file is never overwritten.
+fn write_or_match(path: &Path, contents: &str) -> Result<(), String> {
+    match std::fs::read_to_string(path) {
+        Ok(existing) if existing == contents => Ok(()),
+        Ok(_) => Err(format!(
+            "{} already exists with different contents; it is not overwritten. Choose another --dir",
+            path.display()
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+            use std::io::Write;
+            file.write_all(contents.as_bytes())
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))
+        }
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+    }
+}
+
+fn cmd_split(args: &[String]) -> i32 {
+    let parsed = match parse_edit_args(args, "split", SPLIT_USAGE) {
+        Ok(p) => p,
+        Err(c) => return c as i32,
+    };
+    let ranges = match split_ranges(&parsed.points) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("reeldeck split: {e}");
+            return 2;
+        }
+    };
+    let sha = match hash_source("split", &parsed.input) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    // The manifest lives in the split folder, so the source is named by
+    // its absolute path.
+    let input = match std::fs::canonicalize(&parsed.input) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "reeldeck split: cannot resolve {}: {e}",
+                parsed.input.display()
+            );
+            return 1;
+        }
+    };
+    let dir = parsed.out.unwrap_or_else(|| {
+        let stem = input
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "output".to_string());
+        PathBuf::from(format!("{stem}.split"))
+    });
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("reeldeck split: cannot create {}: {e}", dir.display());
+        return 1;
+    }
+    let mut entries = Vec::with_capacity(ranges.len());
+    for (i, range) in ranges.into_iter().enumerate() {
+        let part = i + 1;
+        let recipe = match edit_recipe("split", &input, &sha, parsed.preset, vec![range]) {
+            Ok(r) => r,
+            Err(c) => return c,
+        };
+        let recipe_name = format!("part{part:02}.recipe.json");
+        let json = recipe.to_json().expect("a validated recipe serializes");
+        if let Err(e) = write_or_match(&dir.join(&recipe_name), &json) {
+            eprintln!("reeldeck split: {e}");
+            return 1;
+        }
+        entries.push(rd_core::BatchEntry {
+            recipe: recipe_name,
+            input: Some(input.display().to_string()),
+            output: Some(edited_output_path(
+                &input,
+                "part",
+                Some(part),
+                parsed.preset,
+            )),
+        });
+    }
+    let manifest = dir.join("split.json");
+    let manifest_json = rd_core::BatchManifest::new(entries)
+        .to_json()
+        .expect("a manifest serializes");
+    if let Err(e) = write_or_match(&manifest, &manifest_json) {
+        eprintln!("reeldeck split: {e}");
+        return 1;
+    }
+    println!("Split manifest: {}", manifest.display());
+    cmd_batch(&[manifest.display().to_string()])
+}
+
 const BATCH_USAGE: &str = "reeldeck batch <manifest.json> [--keep-going] [--status]";
 
 struct BatchArgs {
@@ -1985,6 +2324,121 @@ mod tests {
         let (found, _) = resolve_beside("elsewhere/media.mkv", Some(&dir));
         assert_eq!(found, Some(beside));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keep_args_parse_ranges_and_open_ends() {
+        assert_eq!(
+            parse_keep_arg("12-30.5"),
+            Some(rd_core::KeepRange::new(12.0, Some(30.5)))
+        );
+        assert_eq!(
+            parse_keep_arg("1:00-1:30"),
+            Some(rd_core::KeepRange::new(60.0, Some(90.0)))
+        );
+        assert_eq!(
+            parse_keep_arg("90-"),
+            Some(rd_core::KeepRange::new(90.0, None))
+        );
+        for bad in ["", "12", "a-b", "-5", "1:60-2:00"] {
+            assert_eq!(parse_keep_arg(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn edit_args_require_an_explicit_cut_mode() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let lossless = parse_edit_args(
+            &args(&["in.mp4", "--keep", "1-2", "--lossless"]),
+            "cut",
+            CUT_USAGE,
+        )
+        .unwrap();
+        assert_eq!(lossless.preset, rd_core::ExportPreset::StreamCopy);
+        let accurate = parse_edit_args(
+            &args(&["in.mp4", "--keep", "1-2", "--preset", "access"]),
+            "cut",
+            CUT_USAGE,
+        )
+        .unwrap();
+        assert_eq!(accurate.preset, rd_core::ExportPreset::Access);
+        assert_eq!(
+            parse_edit_args(&args(&["in.mp4", "--keep", "1-2"]), "cut", CUT_USAGE).err(),
+            Some(2)
+        );
+        assert_eq!(
+            parse_edit_args(
+                &args(&[
+                    "in.mp4",
+                    "--keep",
+                    "1-2",
+                    "--lossless",
+                    "--preset",
+                    "access"
+                ]),
+                "cut",
+                CUT_USAGE
+            )
+            .err(),
+            Some(2)
+        );
+        assert_eq!(
+            parse_edit_args(&args(&["in.mp4", "--lossless"]), "cut", CUT_USAGE).err(),
+            Some(2)
+        );
+        assert_eq!(
+            parse_edit_args(
+                &args(&["in.mp4", "--at", "5", "--lossless"]),
+                "cut",
+                CUT_USAGE
+            )
+            .err(),
+            Some(2),
+            "--at belongs to split"
+        );
+        let split = parse_edit_args(
+            &args(&[
+                "in.mp4",
+                "--at",
+                "5",
+                "--at",
+                "1:00",
+                "--preset",
+                "mezzanine",
+            ]),
+            "split",
+            SPLIT_USAGE,
+        )
+        .unwrap();
+        assert_eq!(split.points, vec![5.0, 60.0]);
+    }
+
+    #[test]
+    fn split_points_become_consecutive_ranges() {
+        assert_eq!(
+            split_ranges(&[5.0, 12.0]).unwrap(),
+            vec![
+                rd_core::KeepRange::new(0.0, Some(5.0)),
+                rd_core::KeepRange::new(5.0, Some(12.0)),
+                rd_core::KeepRange::new(12.0, None),
+            ]
+        );
+        assert!(split_ranges(&[0.0]).is_err());
+        assert!(split_ranges(&[5.0, 5.0]).is_err());
+        assert!(split_ranges(&[9.0, 3.0]).is_err());
+    }
+
+    #[test]
+    fn edited_output_names() {
+        let p = Path::new("dir/tape.mkv");
+        assert_eq!(
+            edited_output_path(p, "cut", None, rd_core::ExportPreset::Access),
+            "tape.cut.mp4"
+        );
+        assert_eq!(
+            edited_output_path(p, "part", Some(3), rd_core::ExportPreset::StreamCopy),
+            "tape.part03.mkv"
+        );
     }
 
     #[test]

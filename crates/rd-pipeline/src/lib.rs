@@ -29,6 +29,19 @@ pub enum PipelineError {
     InvalidSegment(String),
     #[error("preview is not available for a chain with stabilization: the stabilization analysis pass must run over the whole input, so a segment preview cannot show what the full render will do")]
     PreviewWithStabilization,
+    #[error("a lossless cut keeps one range per output, because copied streams can only be cut at keyframes and cannot be joined without re-checking them; use `reeldeck split` for one file per range, or a re-encoding intent to remove parts in one file")]
+    LosslessMultiRange,
+    #[error("stabilization cannot be combined with kept ranges: its analysis pass measures the whole source, so a cut render would apply the motion of the wrong frames; stabilize first, then cut the stabilized output")]
+    StabilizationWithCut,
+    #[error("keeping several ranges in one file needs to know whether the source has audio; probe the source first")]
+    AudioUnknown,
+}
+
+/// Facts about the source that a recipe does not carry and some plans
+/// need. Unknown facts stay `None`; a plan that needs one refuses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SourceFacts {
+    pub has_audio: Option<bool>,
 }
 
 /// Format an f32 the way filter strings want it: integers without a
@@ -151,6 +164,11 @@ fn fmt_secs(v: f64) -> String {
 /// frames at field rate passes unflagged frames through once, so the
 /// output count depends on the flags in the file.
 pub fn expected_output_frames(recipe: &Recipe, source_frames: u64) -> Option<u64> {
+    // A cut's length depends on the ranges and the source's rate, which
+    // the frame count alone cannot give.
+    if !recipe.keep.is_empty() {
+        return None;
+    }
     let mut frames = source_frames;
     for op in &recipe.operations {
         if let Operation::Deinterlace {
@@ -281,6 +299,8 @@ pub fn preset_args(preset: ExportPreset) -> Vec<String> {
             "-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p", "-c:a",
             "aac", "-b:a", "192k",
         ],
+        // Every stream, untouched.
+        ExportPreset::StreamCopy => &["-map", "0", "-c", "copy"],
     };
     args.iter().map(|s| s.to_string()).collect()
 }
@@ -299,16 +319,50 @@ pub struct ExportPlan {
     /// Present when the recipe stabilizes: run this before `args`.
     #[serde(default)]
     pub stabilization: Option<StabilizationPlan>,
+    /// What the operator must know before this plan runs (for example
+    /// that a lossless cut starts on a keyframe). The executor records
+    /// each one in the export log.
+    #[serde(default)]
+    pub notices: Vec<String>,
 }
 
 /// Build the export plan for a recipe. The output path is used verbatim;
 /// callers pick the extension matching [`ExportPreset::extension`].
+///
+/// Equivalent to [`export_plan_with_facts`] with no source facts, which
+/// is enough for every recipe except one keeping several ranges.
 pub fn export_plan(
     recipe: &Recipe,
     input: &str,
     output: &str,
 ) -> Result<ExportPlan, PipelineError> {
-    let chain = filter_chain(recipe)?;
+    export_plan_with_facts(recipe, input, output, &SourceFacts::default())
+}
+
+/// Build the export plan for a recipe, given facts about its source.
+///
+/// Kept ranges (recipe schema 2) are planned two ways, never confused:
+///
+/// - **Re-encoding intents** cut frame-accurately. One range is input
+///   seeking plus a duration; several are trimmed from the decoded
+///   streams and concatenated in one filter graph (video and the first
+///   audio stream, which is why the plan needs to know whether there is
+///   audio), and the restoration chain runs on the result.
+/// - **Stream copy** copies every stream untouched. One range is cut
+///   with input seeking, which can only start on a keyframe — stated in
+///   [`ExportPlan::notices`] before the run. Several ranges are refused.
+pub fn export_plan_with_facts(
+    recipe: &Recipe,
+    input: &str,
+    output: &str,
+    facts: &SourceFacts,
+) -> Result<ExportPlan, PipelineError> {
+    recipe.validate()?;
+    let chain = if recipe.operations.is_empty() {
+        String::new()
+    } else {
+        filter_chain(recipe)?
+    };
     let stabilization = recipe.operations.iter().find_map(|op| match op {
         Operation::Stabilize { smoothing, .. } => Some(stabilization_plan(
             input,
@@ -317,15 +371,65 @@ pub fn export_plan(
         )),
         _ => None,
     });
-    let mut args: Vec<String> = vec![
-        "ffmpeg".to_string(),
-        "-hide_banner".to_string(),
-        "-i".to_string(),
-        input.to_string(),
-        "-vf".to_string(),
-        chain.clone(),
-    ];
+    if stabilization.is_some() && !recipe.keep.is_empty() {
+        return Err(PipelineError::StabilizationWithCut);
+    }
+    let stream_copy = recipe.export_preset == ExportPreset::StreamCopy;
+    if stream_copy && recipe.keep.len() > 1 {
+        return Err(PipelineError::LosslessMultiRange);
+    }
+
+    let mut notices = Vec::new();
+    let mut args: Vec<String> = vec!["ffmpeg".to_string(), "-hide_banner".to_string()];
+    match recipe.keep.as_slice() {
+        [] => {
+            args.extend(["-i".to_string(), input.to_string()]);
+            if !chain.is_empty() {
+                args.extend(["-vf".to_string(), chain.clone()]);
+            }
+        }
+        [range] => {
+            if range.start_secs > 0.0 {
+                args.extend(["-ss".to_string(), fmt_secs(range.start_secs)]);
+            }
+            args.extend(["-i".to_string(), input.to_string()]);
+            if let Some(duration) = range.duration_secs() {
+                args.extend(["-t".to_string(), fmt_secs(duration)]);
+            }
+            if !chain.is_empty() {
+                args.extend(["-vf".to_string(), chain.clone()]);
+            }
+            if stream_copy && range.start_secs > 0.0 {
+                notices.push(format!(
+                    "lossless cut: copied streams can only start on a keyframe, so the output starts at the last keyframe at or before {}s, not exactly there",
+                    fmt_secs(range.start_secs)
+                ));
+            }
+        }
+        ranges => {
+            let has_audio = facts.has_audio.ok_or(PipelineError::AudioUnknown)?;
+            args.extend(["-i".to_string(), input.to_string()]);
+            let graph = keep_graph(ranges, has_audio, &chain);
+            args.extend(["-filter_complex".to_string(), graph]);
+            args.extend(["-map".to_string(), "[vout]".to_string()]);
+            if has_audio {
+                args.extend(["-map".to_string(), "[aout]".to_string()]);
+            } else {
+                notices
+                    .push("the source has no audio stream; the output is picture only".to_string());
+            }
+            notices.push(format!(
+                "{} ranges are joined in one file; only the first video and first audio stream are kept",
+                ranges.len()
+            ));
+        }
+    }
     args.extend(preset_args(recipe.export_preset));
+    if stream_copy && !recipe.keep.is_empty() {
+        // Copied packets keep their original timestamps; shift them so
+        // the output starts at zero instead of at the cut point.
+        args.extend(["-avoid_negative_ts".to_string(), "make_zero".to_string()]);
+    }
     args.push("-y".to_string());
     args.push(output.to_string());
     Ok(ExportPlan {
@@ -335,7 +439,47 @@ pub fn export_plan(
         filter_chain: chain,
         args,
         stabilization,
+        notices,
     })
+}
+
+/// The filter graph keeping several ranges: each range trimmed from the
+/// first video (and audio) stream with its timestamps reset, all of them
+/// concatenated in order, then the restoration chain on the result.
+fn keep_graph(ranges: &[rd_core::KeepRange], has_audio: bool, chain: &str) -> String {
+    let bounds = |r: &rd_core::KeepRange| match r.end_secs {
+        Some(end) => format!("start={}:end={}", fmt_secs(r.start_secs), fmt_secs(end)),
+        None => format!("start={}", fmt_secs(r.start_secs)),
+    };
+    let mut parts = Vec::new();
+    let mut inputs = String::new();
+    for (i, range) in ranges.iter().enumerate() {
+        parts.push(format!(
+            "[0:v:0]trim={},setpts=PTS-STARTPTS[v{i}]",
+            bounds(range)
+        ));
+        inputs.push_str(&format!("[v{i}]"));
+        if has_audio {
+            parts.push(format!(
+                "[0:a:0]atrim={},asetpts=PTS-STARTPTS[a{i}]",
+                bounds(range)
+            ));
+            inputs.push_str(&format!("[a{i}]"));
+        }
+    }
+    let n = ranges.len();
+    let (a, outs) = if has_audio {
+        (1, "[vcat][aout]")
+    } else {
+        (0, "[vcat]")
+    };
+    parts.push(format!("{inputs}concat=n={n}:v=1:a={a}{outs}"));
+    if chain.is_empty() {
+        parts.push("[vcat]null[vout]".to_string());
+    } else {
+        parts.push(format!("[vcat]{chain}[vout]"));
+    }
+    parts.join(";")
 }
 
 /// Build the plan for a **segment preview**: the recipe's chain and
@@ -394,6 +538,7 @@ pub fn preview_plan(
         filter_chain: chain,
         args,
         stabilization: None,
+        notices: Vec::new(),
     })
 }
 
@@ -413,6 +558,129 @@ mod tests {
             output_rate,
             only_flagged,
         })
+    }
+
+    fn args(plan: &ExportPlan) -> String {
+        plan.args.join(" ")
+    }
+
+    #[test]
+    fn golden_trim_reencodes_frame_accurately() {
+        let recipe = Recipe::new("in.mkv", ExportPreset::Access).keep_range(12.5, Some(20.0));
+        let plan = export_plan(&recipe, "in.mkv", "out.mp4").expect("plan");
+        assert_eq!(
+            args(&plan),
+            "ffmpeg -hide_banner -ss 12.5 -i in.mkv -t 7.5 -c:v libx264 -crf 18 -preset slow \
+             -pix_fmt yuv420p -c:a aac -b:a 192k -y out.mp4"
+        );
+        assert!(plan.notices.is_empty());
+        assert_eq!(plan.filter_chain, "");
+    }
+
+    #[test]
+    fn golden_trim_carries_the_restoration_chain() {
+        let recipe = deinterlace(DeinterlaceEngine::Bwdif, OutputRate::SendField, false)
+            .keep_range(0.0, Some(30.0));
+        let plan = export_plan(&recipe, "in.mkv", "out.mkv").expect("plan");
+        assert!(args(&plan).starts_with(
+            "ffmpeg -hide_banner -i in.mkv -t 30 -vf bwdif=mode=send_field:parity=tff:deint=all -c:v ffv1"
+        ), "{}", args(&plan));
+    }
+
+    #[test]
+    fn golden_several_ranges_join_in_one_graph() {
+        let recipe = deinterlace(DeinterlaceEngine::Bwdif, OutputRate::SendFrame, false)
+            .keep_range(0.0, Some(10.0))
+            .keep_range(20.0, None);
+        assert!(matches!(
+            export_plan(&recipe, "in.mkv", "out.mkv"),
+            Err(PipelineError::AudioUnknown)
+        ));
+        let with_audio = SourceFacts {
+            has_audio: Some(true),
+        };
+        let plan = export_plan_with_facts(&recipe, "in.mkv", "out.mkv", &with_audio).expect("plan");
+        let graph = plan.args[plan
+            .args
+            .iter()
+            .position(|a| a == "-filter_complex")
+            .unwrap()
+            + 1]
+        .clone();
+        assert_eq!(
+            graph,
+            "[0:v:0]trim=start=0:end=10,setpts=PTS-STARTPTS[v0];\
+             [0:a:0]atrim=start=0:end=10,asetpts=PTS-STARTPTS[a0];\
+             [0:v:0]trim=start=20,setpts=PTS-STARTPTS[v1];\
+             [0:a:0]atrim=start=20,asetpts=PTS-STARTPTS[a1];\
+             [v0][a0][v1][a1]concat=n=2:v=1:a=1[vcat][aout];\
+             [vcat]bwdif=mode=send_frame:parity=tff:deint=all[vout]"
+        );
+        assert!(args(&plan).contains("-map [vout] -map [aout] -c:v ffv1"));
+
+        let silent = SourceFacts {
+            has_audio: Some(false),
+        };
+        let plan = export_plan_with_facts(
+            &Recipe::new("in.mkv", ExportPreset::Access)
+                .keep_range(1.0, Some(2.0))
+                .keep_range(3.0, Some(4.0)),
+            "in.mkv",
+            "out.mp4",
+            &silent,
+        )
+        .expect("plan");
+        let joined = args(&plan);
+        assert!(
+            joined.contains("[v0][v1]concat=n=2:v=1:a=0[vcat];[vcat]null[vout]"),
+            "{joined}"
+        );
+        assert!(!joined.contains("[aout]"));
+        assert!(plan.notices.iter().any(|n| n.contains("no audio")));
+    }
+
+    #[test]
+    fn golden_stream_copy_remux_and_lossless_cut() {
+        let remux = Recipe::new("in.mov", ExportPreset::StreamCopy);
+        assert_eq!(
+            args(&export_plan(&remux, "in.mov", "out.mkv").unwrap()),
+            "ffmpeg -hide_banner -i in.mov -map 0 -c copy -y out.mkv"
+        );
+        let cut = Recipe::new("in.mov", ExportPreset::StreamCopy).keep_range(60.0, Some(90.0));
+        let plan = export_plan(&cut, "in.mov", "out.mkv").unwrap();
+        assert_eq!(
+            args(&plan),
+            "ffmpeg -hide_banner -ss 60 -i in.mov -t 30 -map 0 -c copy -avoid_negative_ts make_zero -y out.mkv"
+        );
+        assert_eq!(plan.notices.len(), 1);
+        assert!(plan.notices[0].contains("keyframe at or before 60s"));
+        let several = cut.keep_range(100.0, Some(110.0));
+        assert!(matches!(
+            export_plan(&several, "in.mov", "out.mkv"),
+            Err(PipelineError::LosslessMultiRange)
+        ));
+    }
+
+    #[test]
+    fn stabilization_and_cuts_are_refused_together() {
+        let recipe = Recipe::new("in.mp4", ExportPreset::Access)
+            .push(Operation::Stabilize {
+                smoothing: 15,
+                zoom_percent: 0.0,
+                tripod: false,
+            })
+            .keep_range(5.0, Some(9.0));
+        assert!(matches!(
+            export_plan(&recipe, "in.mp4", "out.mp4"),
+            Err(PipelineError::StabilizationWithCut)
+        ));
+    }
+
+    #[test]
+    fn cut_frame_totals_are_unknown() {
+        let recipe = deinterlace(DeinterlaceEngine::Bwdif, OutputRate::SendField, false)
+            .keep_range(0.0, Some(2.0));
+        assert_eq!(expected_output_frames(&recipe, 100), None);
     }
 
     #[test]

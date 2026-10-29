@@ -13,20 +13,33 @@ use thiserror::Error;
 
 use crate::hash::is_sha256_hex;
 
-/// The current recipe schema version.
-pub const RECIPE_SCHEMA_VERSION: u32 = 1;
+/// The recipe schema version this build writes. Schema 2 adds edit
+/// fields (kept ranges, the stream-copy intent); schema-1 recipes still
+/// load and re-run unchanged.
+pub const RECIPE_SCHEMA_VERSION: u32 = 2;
+
+/// The oldest recipe schema version this build reads.
+pub const MIN_RECIPE_SCHEMA_VERSION: u32 = 1;
 
 /// Why a recipe is not safe to run.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum RecipeError {
-    #[error("recipe has no operations; a restoration must do at least one thing, explicitly")]
+    #[error("recipe has no operations and keeps no ranges; a recipe must do at least one thing, explicitly")]
     EmptyOperations,
     #[error("recipe source name is empty")]
     EmptySourceName,
     #[error(
-        "unsupported recipe schema version {0}; this build understands {RECIPE_SCHEMA_VERSION}"
+        "unsupported recipe schema version {0}; this build understands {MIN_RECIPE_SCHEMA_VERSION} to {RECIPE_SCHEMA_VERSION}"
     )]
     UnsupportedSchemaVersion(u32),
+    #[error(
+        "this recipe uses {0}, which needs recipe schema 2; a schema-1 recipe cannot carry it"
+    )]
+    NeedsSchema2(&'static str),
+    #[error("kept range {index} is invalid: {detail}")]
+    BadRange { index: usize, detail: String },
+    #[error("a stream-copy export copies the streams untouched, so it cannot apply operations; remove them or choose an intent that re-encodes")]
+    StreamCopyWithOperations,
     #[error("source SHA-256 is not a 64-character hex string: {0}")]
     BadSourceHash(String),
     #[error("denoise {field} strength {value} is outside the allowed range 0.0..=20.0")]
@@ -262,7 +275,7 @@ impl Operation {
     }
 }
 
-/// The export intent. The three intents are never interchangeable: a
+/// The export intent. The intents are never interchangeable: a
 /// Preservation master is not a delivery file and vice versa.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -273,6 +286,11 @@ pub enum ExportPreset {
     Mezzanine,
     /// H.264 in MP4, CRF-based: for viewing and sharing, never a master.
     Access,
+    /// Streams copied untouched into a new container (schema 2): a
+    /// lossless cut or remux. Nothing is decoded, so no operation can
+    /// apply, and a cut can only start on a keyframe. Not a
+    /// preservation master: the codecs are whatever the source used.
+    StreamCopy,
 }
 
 impl ExportPreset {
@@ -282,6 +300,8 @@ impl ExportPreset {
             ExportPreset::PreservationMaster => "mkv",
             ExportPreset::Mezzanine => "mov",
             ExportPreset::Access => "mp4",
+            // Matroska holds nearly any codec the source might carry.
+            ExportPreset::StreamCopy => "mkv",
         }
     }
 }
@@ -302,6 +322,68 @@ pub struct Recipe {
     /// Free-text operator notes; carried into the export log.
     #[serde(default)]
     pub notes: String,
+    /// Ranges of the source to keep, in order (schema 2). Empty keeps the
+    /// whole source. One range is a trim; several remove the parts
+    /// between them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keep: Vec<KeepRange>,
+}
+
+/// A range of the source to keep, in seconds from its start.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct KeepRange {
+    pub start_secs: f64,
+    /// End of the range; `None` keeps to the end of the source.
+    #[serde(default)]
+    pub end_secs: Option<f64>,
+}
+
+impl KeepRange {
+    pub fn new(start_secs: f64, end_secs: Option<f64>) -> Self {
+        KeepRange {
+            start_secs,
+            end_secs,
+        }
+    }
+
+    /// Length in seconds, when the range has an end.
+    pub fn duration_secs(&self) -> Option<f64> {
+        self.end_secs.map(|end| end - self.start_secs)
+    }
+}
+
+/// Parse a time as seconds (`90`, `90.5`) or timecode-style clock time
+/// (`1:30`, `01:01:30.250`). Returns `None` for anything else, including
+/// negative values and minute/second fields of 60 or more.
+pub fn parse_time(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = text.split(':').collect();
+    if parts.len() > 3 {
+        return None;
+    }
+    let mut secs = 0.0;
+    for (i, part) in parts.iter().enumerate() {
+        let last = i == parts.len() - 1;
+        let value: f64 = if last {
+            part.parse().ok()?
+        } else {
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            part.parse().ok()?
+        };
+        if !value.is_finite() || value < 0.0 || part.starts_with('+') {
+            return None;
+        }
+        if i > 0 && value >= 60.0 {
+            return None;
+        }
+        secs = secs * 60.0 + value;
+    }
+    Some(secs)
 }
 
 impl Recipe {
@@ -313,7 +395,19 @@ impl Recipe {
             operations: Vec::new(),
             export_preset,
             notes: String::new(),
+            keep: Vec::new(),
         }
+    }
+
+    /// Keep a range of the source (see [`Recipe::keep`]).
+    pub fn keep_range(mut self, start_secs: f64, end_secs: Option<f64>) -> Self {
+        self.keep.push(KeepRange::new(start_secs, end_secs));
+        self
+    }
+
+    /// True when the recipe uses a field only schema 2 can carry.
+    pub fn uses_schema2(&self) -> bool {
+        !self.keep.is_empty() || self.export_preset == ExportPreset::StreamCopy
     }
 
     pub fn push(mut self, op: Operation) -> Self {
@@ -323,8 +417,16 @@ impl Recipe {
 
     /// Validate the whole recipe before any planning or rendering.
     pub fn validate(&self) -> Result<(), RecipeError> {
-        if self.schema_version != RECIPE_SCHEMA_VERSION {
+        if !(MIN_RECIPE_SCHEMA_VERSION..=RECIPE_SCHEMA_VERSION).contains(&self.schema_version) {
             return Err(RecipeError::UnsupportedSchemaVersion(self.schema_version));
+        }
+        if self.schema_version < 2 {
+            if !self.keep.is_empty() {
+                return Err(RecipeError::NeedsSchema2("kept ranges"));
+            }
+            if self.export_preset == ExportPreset::StreamCopy {
+                return Err(RecipeError::NeedsSchema2("the stream-copy intent"));
+            }
         }
         if self.source_name.trim().is_empty() {
             return Err(RecipeError::EmptySourceName);
@@ -334,11 +436,60 @@ impl Recipe {
                 return Err(RecipeError::BadSourceHash(hash.clone()));
             }
         }
-        if self.operations.is_empty() {
+        // A stream copy changes the container even with nothing else to
+        // do, so it counts as an explicit action.
+        if self.operations.is_empty()
+            && self.keep.is_empty()
+            && self.export_preset != ExportPreset::StreamCopy
+        {
             return Err(RecipeError::EmptyOperations);
+        }
+        if self.export_preset == ExportPreset::StreamCopy && !self.operations.is_empty() {
+            return Err(RecipeError::StreamCopyWithOperations);
         }
         for op in &self.operations {
             op.validate()?;
+        }
+        self.validate_keep()
+    }
+
+    /// Kept ranges must be finite, start at or after 0, have positive
+    /// length, and run in order without overlapping. Only the last may
+    /// be open-ended.
+    fn validate_keep(&self) -> Result<(), RecipeError> {
+        let mut previous_end = 0.0_f64;
+        for (i, range) in self.keep.iter().enumerate() {
+            let index = i + 1;
+            let bad = |detail: String| RecipeError::BadRange { index, detail };
+            if !range.start_secs.is_finite() || range.start_secs < 0.0 {
+                return Err(bad(format!(
+                    "start {} must be a finite, non-negative number of seconds",
+                    range.start_secs
+                )));
+            }
+            if i > 0 && range.start_secs < previous_end {
+                return Err(bad(format!(
+                    "starts at {}s, before the previous range ends at {previous_end}s; ranges must be in order and not overlap",
+                    range.start_secs
+                )));
+            }
+            match range.end_secs {
+                Some(end) => {
+                    if !end.is_finite() || end <= range.start_secs {
+                        return Err(bad(format!(
+                            "end {end} must be a finite number greater than its start {}",
+                            range.start_secs
+                        )));
+                    }
+                    previous_end = end;
+                }
+                None if i + 1 < self.keep.len() => {
+                    return Err(bad(
+                        "only the last range may run to the end of the source".to_string()
+                    ));
+                }
+                None => {}
+            }
         }
         Ok(())
     }
@@ -437,6 +588,115 @@ mod tests {
             recipe.validate(),
             Err(RecipeError::BadSourceHash(_))
         ));
+    }
+
+    #[test]
+    fn schema1_recipes_still_load_and_validate() {
+        let mut recipe = sample_recipe();
+        recipe.schema_version = 1;
+        let json = recipe.to_json().expect("serialize");
+        assert!(
+            !json.contains("keep"),
+            "an unused edit field is not written"
+        );
+        let back = Recipe::from_json(&json).expect("deserialize");
+        assert!(back.validate().is_ok());
+        assert!(!back.uses_schema2());
+    }
+
+    #[test]
+    fn edit_fields_need_schema2() {
+        let mut trimmed = sample_recipe().keep_range(10.0, Some(20.0));
+        assert!(trimmed.validate().is_ok());
+        assert!(trimmed.uses_schema2());
+        trimmed.schema_version = 1;
+        assert_eq!(
+            trimmed.validate(),
+            Err(RecipeError::NeedsSchema2("kept ranges"))
+        );
+        let mut copy = Recipe::new("x.mkv", ExportPreset::StreamCopy);
+        copy.schema_version = 1;
+        assert_eq!(
+            copy.validate(),
+            Err(RecipeError::NeedsSchema2("the stream-copy intent"))
+        );
+        let mut future = sample_recipe();
+        future.schema_version = 3;
+        assert_eq!(
+            future.validate(),
+            Err(RecipeError::UnsupportedSchemaVersion(3))
+        );
+    }
+
+    #[test]
+    fn a_trim_alone_is_a_valid_recipe_and_round_trips() {
+        let recipe = Recipe::new("x.mkv", ExportPreset::Access)
+            .keep_range(5.0, Some(9.5))
+            .keep_range(12.0, None);
+        assert!(recipe.validate().is_ok());
+        let back = Recipe::from_json(&recipe.to_json().unwrap()).unwrap();
+        assert_eq!(back, recipe);
+        assert_eq!(back.keep[0].duration_secs(), Some(4.5));
+        assert_eq!(back.keep[1].duration_secs(), None);
+    }
+
+    #[test]
+    fn stream_copy_rules() {
+        assert!(Recipe::new("x.mp4", ExportPreset::StreamCopy)
+            .validate()
+            .is_ok());
+        assert!(Recipe::new("x.mp4", ExportPreset::StreamCopy)
+            .keep_range(1.0, Some(2.0))
+            .validate()
+            .is_ok());
+        let mut with_ops = sample_recipe();
+        with_ops.export_preset = ExportPreset::StreamCopy;
+        assert_eq!(
+            with_ops.validate(),
+            Err(RecipeError::StreamCopyWithOperations)
+        );
+        assert_eq!(ExportPreset::StreamCopy.extension(), "mkv");
+    }
+
+    #[test]
+    fn kept_ranges_are_checked() {
+        let bad = |recipe: Recipe| match recipe.validate() {
+            Err(RecipeError::BadRange { index, detail }) => (index, detail),
+            other => panic!("expected BadRange, got {other:?}"),
+        };
+        let base = || Recipe::new("x.mkv", ExportPreset::Access);
+        assert_eq!(bad(base().keep_range(-1.0, Some(2.0))).0, 1);
+        assert_eq!(bad(base().keep_range(5.0, Some(5.0))).0, 1);
+        assert_eq!(bad(base().keep_range(f64::NAN, None)).0, 1);
+        let (index, detail) = bad(base()
+            .keep_range(0.0, Some(10.0))
+            .keep_range(9.0, Some(12.0)));
+        assert_eq!(index, 2);
+        assert!(detail.contains("in order"), "{detail}");
+        let (index, detail) = bad(base().keep_range(0.0, None).keep_range(20.0, Some(30.0)));
+        assert_eq!(index, 1);
+        assert!(detail.contains("only the last"), "{detail}");
+        assert!(
+            base()
+                .keep_range(0.0, Some(10.0))
+                .keep_range(10.0, Some(12.0))
+                .validate()
+                .is_ok(),
+            "touching ranges are allowed"
+        );
+    }
+
+    #[test]
+    fn times_parse_as_seconds_or_clock_time() {
+        assert_eq!(parse_time("90"), Some(90.0));
+        assert_eq!(parse_time(" 90.5 "), Some(90.5));
+        assert_eq!(parse_time("1:30"), Some(90.0));
+        assert_eq!(parse_time("01:01:30.250"), Some(3690.25));
+        for bad in [
+            "", "-5", "1:60", "1:2:3:4", "a", "1::2", "+3", "1:-3", "inf", "NaN",
+        ] {
+            assert_eq!(parse_time(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

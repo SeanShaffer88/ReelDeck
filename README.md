@@ -96,7 +96,7 @@ leaves the disk.
 | `crates/rd-pipeline` | Planning: recipe → filter strings, two-pass stabilization plan, export argument vectors. Plans only; never executes. |
 | `crates/rd-run` | Execution: runs plans with FFmpeg (fixity gate, never-overwrite, measured progress, cancellation) and writes the recipe + export-log proof beside every output; runs resumable batches. |
 | `crates/rd-ui` | Interface state model and design system: workflow stages and gates, per-source chain state with undo/redo, chain editing and guards, timeline lanes/marks, formatting, preferences, commands, pre-export checks — plus a framework-neutral shell prototype. |
-| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `batch`, `hash`, `version`. |
+| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `batch`, `cut`, `split`, `hash`, `version`. |
 
 ## Building from source
 
@@ -240,6 +240,29 @@ cargo run -p reeldeck -- batch batch.json --keep-going
 # Print the saved state without rendering
 cargo run -p reeldeck -- batch batch.json --status
 ```
+
+`cut` keeps one or more ranges of a file, and `split` writes one file
+per part. Times are seconds or `h:mm:ss`; `90-` keeps to the end. There
+are two ways to cut, and you always choose one:
+
+- `--lossless` copies the streams untouched (fast, no quality change).
+  Copied streams can only start on a keyframe, so the cut starts at the
+  last keyframe at or before the time you asked for; the export log
+  records both. One range per file — use `split` for several.
+- `--preset preservation|mezzanine|access` re-encodes and cuts exactly
+  where you asked, and can keep several ranges in one file.
+
+```sh
+# Remove the middle: keep 0–1:00 and 2:30 to the end, re-encoded
+cargo run -p reeldeck -- cut tape.mkv --keep 0-1:00 --keep 2:30- --preset preservation
+# A lossless trim
+cargo run -p reeldeck -- cut tape.mkv --keep 10:00-25:00 --lossless
+# Three parts in tape.split/, each with its own proof, run as a batch
+cargo run -p reeldeck -- split tape.mkv --at 20:00 --at 40:00 --lossless
+```
+
+Recipes that use these edit fields are written as schema 2; schema-1
+recipes keep loading and re-running unchanged.
 
 Checks every change must pass (also run by CI):
 

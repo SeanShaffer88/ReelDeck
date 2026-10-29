@@ -716,6 +716,72 @@ pub fn probe(path: &Path) -> Result<ProbeInfo, AnalyzeError> {
     }
 }
 
+/// The time of the last video keyframe at or before `secs`: where a
+/// lossless (stream-copy) cut requested at `secs` really starts.
+///
+/// Reads keyframe timestamps from the 60 seconds before `secs` (a
+/// keyframe interval longer than that yields `Ok(None)`, and the caller
+/// says the snap point is unknown rather than guessing).
+pub fn keyframe_at_or_before(path: &Path, secs: f64) -> Result<Option<f64>, AnalyzeError> {
+    if !secs.is_finite() || secs < 0.0 {
+        return Err(AnalyzeError::InvalidRange(format!(
+            "keyframe lookup time must be a finite, non-negative number of seconds, got {secs}"
+        )));
+    }
+    let window = format!("{}%{}", (secs - 60.0).max(0.0), secs + 0.001);
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-skip_frame",
+            "nokey",
+            "-read_intervals",
+            &window,
+            "-show_entries",
+            "frame=best_effort_timestamp_time",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|_| AnalyzeError::ToolUnavailable("ffprobe".to_string()))?;
+    if !output.status.success() {
+        return Err(AnalyzeError::ToolFailed {
+            tool: "ffprobe",
+            detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(last_time_at_or_before(
+        &parse_keyframe_times(&String::from_utf8_lossy(&output.stdout)),
+        secs,
+    ))
+}
+
+/// Keyframe times from ffprobe's `frame=best_effort_timestamp_time` CSV
+/// output, one per line. Lines without a usable time (`N/A`, empty)
+/// are skipped; trailing fields some builds append are ignored.
+pub fn parse_keyframe_times(text: &str) -> Vec<f64> {
+    text.lines()
+        .filter_map(|line| line.split(',').next())
+        .filter_map(|field| field.trim().parse::<f64>().ok())
+        .filter(|t| t.is_finite())
+        .collect()
+}
+
+/// The largest of `times` that is at or before `secs` (with a
+/// microsecond of tolerance for timestamp rounding).
+pub fn last_time_at_or_before(times: &[f64], secs: f64) -> Option<f64> {
+    times
+        .iter()
+        .copied()
+        .filter(|t| *t <= secs + 1e-6)
+        .fold(None, |best: Option<f64>, t| {
+            Some(best.map_or(t, |b| b.max(t)))
+        })
+}
+
 /// Probe a media file with `ffprobe` and parse the result.
 ///
 /// This is the fallback behind [`probe`], kept public so callers can
@@ -930,6 +996,17 @@ TAG:lavfi.signalstats.TOUT=0.42
 TAG:lavfi.signalstats.BRNG=0.010
 [/FRAME]
 ";
+
+    #[test]
+    fn keyframe_times_parse_and_pick_the_snap_point() {
+        // Real ffprobe output shape, including a stray trailing comma.
+        let times = parse_keyframe_times("0.000000,\n2.000000\nN/A\n\n4.000000\n");
+        assert_eq!(times, vec![0.0, 2.0, 4.0]);
+        assert_eq!(last_time_at_or_before(&times, 2.5), Some(2.0));
+        assert_eq!(last_time_at_or_before(&times, 4.0), Some(4.0));
+        assert_eq!(last_time_at_or_before(&[3.0], 2.0), None);
+        assert_eq!(last_time_at_or_before(&[], 2.0), None);
+    }
 
     #[test]
     fn estimates_video_frames_from_duration_and_rate() {
