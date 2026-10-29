@@ -69,7 +69,9 @@ fn export_bwdif_send_field_doubles_rate_and_writes_proof() {
         rd_core::sha256_file(&output).expect("hash output")
     );
 
-    let probe = rd_analyze::probe(&output).expect("probe output");
+    // ffprobe directly: the frame rate is not a header fact the MediaKit
+    // probe (tried first on Windows) reports.
+    let probe = rd_analyze::probe_ffprobe(&output).expect("probe output");
     let video = probe.first_video().expect("output has a video stream");
     assert_eq!(video.avg_frame_rate.as_deref(), Some("50/1"));
 

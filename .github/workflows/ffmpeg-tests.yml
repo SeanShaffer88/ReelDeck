@@ -38,7 +38,7 @@ jobs:
 
       - name: Run the FFmpeg-dependent tests
         run: |
-          cargo test --workspace -- --ignored --test-threads=1 2>&1 | Tee-Object -FilePath ffmpeg-tests.log
+          cargo test --workspace --no-fail-fast -- --ignored --test-threads=1 2>&1 | Tee-Object -FilePath ffmpeg-tests.log
           $code = $LASTEXITCODE
           $summary = Select-String -Path ffmpeg-tests.log -Pattern '^test result' | ForEach-Object { $_.Line }
           Write-Output "::notice title=FFmpeg tests::$($summary -join ' | ')"
