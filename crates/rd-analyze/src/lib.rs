@@ -4,8 +4,11 @@
 //! JSON, `signalstats` frame metadata, and the `blackdetect` /
 //! `freezedetect` / `idet` log formats — into a typed model the UI and
 //! CLI can present. Parsing is pure and fully unit-tested; process
-//! execution in this crate is limited to [`probe`] and [`analyze`],
-//! which shell out to `ffprobe` / `ffmpeg` and report a typed
+//! execution in this crate is limited to [`probe`] and [`analyze`].
+//! [`probe`] asks MediaKit (via the `rd-mediakit` crate) for
+//! header-level facts first and falls back to shelling out to
+//! `ffprobe`; [`analyze`] shells out to `ffprobe` / `ffmpeg` for its
+//! measurement passes. Both report a typed
 //! [`AnalyzeError::ToolUnavailable`] when a tool is missing, rather
 //! than panicking or inventing data.
 //!
@@ -20,6 +23,8 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub mod mediakit;
 
 #[derive(Debug, Error)]
 pub enum AnalyzeError {
@@ -673,12 +678,34 @@ fn secs(v: f64) -> String {
     format!("{v}")
 }
 
+/// Probe a media file for header-level facts: container, duration,
+/// bitrate, and per-stream codec / dimensions / sample-rate /
+/// channel facts.
+///
+/// MediaKit is asked first (see [`mediakit`]): it reads the headers
+/// directly, without spawning a process. When MediaKit is
+/// unavailable on this platform, does not recognize the container,
+/// or reports an error, the probe falls back to
+/// [`probe_ffprobe`] — MediaKit failing to answer is never itself a
+/// hard failure. Fields MediaKit cannot supply (frame rate, field
+/// order) stay unset in a MediaKit-sourced result.
+///
+/// Returns [`AnalyzeError::ToolUnavailable`] when the fallback is
+/// reached and ffprobe is not installed — inspection is impossible
+/// without it, and this crate will not fabricate a result.
+pub fn probe(path: &Path) -> Result<ProbeInfo, AnalyzeError> {
+    match mediakit::probe_via_mediakit(path) {
+        Ok(info) => Ok(info),
+        Err(_) => probe_ffprobe(path),
+    }
+}
+
 /// Probe a media file with `ffprobe` and parse the result.
 ///
-/// Returns [`AnalyzeError::ToolUnavailable`] when ffprobe is not
-/// installed — inspection is impossible without it, and this crate
-/// will not fabricate a result.
-pub fn probe(path: &Path) -> Result<ProbeInfo, AnalyzeError> {
+/// This is the fallback behind [`probe`], kept public so callers can
+/// ask for the ffprobe view specifically. Returns
+/// [`AnalyzeError::ToolUnavailable`] when ffprobe is not installed.
+pub fn probe_ffprobe(path: &Path) -> Result<ProbeInfo, AnalyzeError> {
     let output = Command::new("ffprobe")
         .args([
             "-v",
