@@ -31,6 +31,8 @@
 //!                                 output (lossless or re-encoded)
 //!   reeldeck convert <file> …     Convert to a container/codec with
 //!                                 output settings or a saved profile
+//!   reeldeck metadata <file> …    Show, or write a copy with new,
+//!                                 title / description / tags
 //!   reeldeck hash <file>          Print the file's SHA-256
 //!   reeldeck version              Print the version
 
@@ -58,6 +60,7 @@ fn main() -> ExitCode {
         Some("split") => cmd_split(&args[1..]),
         Some("join") => cmd_join(&args[1..]),
         Some("convert") => cmd_convert(&args[1..]),
+        Some("metadata") => cmd_metadata(&args[1..]),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_usage();
             0
@@ -130,6 +133,13 @@ fn print_usage() {
          \x20                               Re-encode to these output settings (flags override a\n\
          \x20                               profile). Combinations a container cannot carry are\n\
          \x20                               refused with the reason; see profiles/ for examples\n\
+         \x20 reeldeck metadata <file> [--title <text>] [--description <text>] [--tag <word> …] [--clear] [--out <file>]\n\
+         \x20                               With no flags, print the file's metadata. Otherwise\n\
+         \x20                               write a NEW file in the same container with the\n\
+         \x20                               streams copied untouched and these fields set\n\
+         \x20                               (--clear drops the source's file-level metadata\n\
+         \x20                               first). Fields the container does not keep are\n\
+         \x20                               reported and recorded in the export log\n\
          \x20 reeldeck hash <file>          Print the file's SHA-256\n\
          \x20 reeldeck version              Print the version"
     );
@@ -821,6 +831,13 @@ fn run_render(
         Ok(report) => {
             println!("Output: {}", report.output.display());
             println!("SHA-256: {}", report.output_sha256);
+            for warning in report
+                .warnings
+                .iter()
+                .filter(|w| w.starts_with("metadata:"))
+            {
+                println!("Warning: {warning}");
+            }
             println!("Recipe: {}", report.recipe_path.display());
             println!("Export log: {}", report.log_path.display());
             Ok(report)
@@ -1666,7 +1683,7 @@ fn cmd_cut(args: &[String]) -> i32 {
             &parsed.input,
             "cut",
             None,
-            parsed.preset,
+            parsed.preset.extension(),
         ))
     });
     execute_run("cut", &recipe, &parsed.input, &output, None)
@@ -1674,19 +1691,14 @@ fn cmd_cut(args: &[String]) -> i32 {
 
 /// `capture.mkv` → `capture.cut.mkv` / `capture.part02.mkv`, with the
 /// preset's extension.
-fn edited_output_path(
-    input: &Path,
-    tag: &str,
-    part: Option<usize>,
-    preset: rd_core::ExportPreset,
-) -> String {
+fn edited_output_path(input: &Path, tag: &str, part: Option<usize>, ext: &str) -> String {
     let stem = input
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output".to_string());
     match part {
-        Some(n) => format!("{stem}.{tag}{n:02}.{}", preset.extension()),
-        None => format!("{stem}.{tag}.{}", preset.extension()),
+        Some(n) => format!("{stem}.{tag}{n:02}.{}", ext),
+        None => format!("{stem}.{tag}.{}", ext),
     }
 }
 
@@ -1790,7 +1802,7 @@ fn cmd_split(args: &[String]) -> i32 {
                 &input,
                 "part",
                 Some(part),
-                parsed.preset,
+                parsed.preset.extension(),
             )),
         });
     }
@@ -1974,6 +1986,115 @@ fn cmd_convert(args: &[String]) -> i32 {
     execute_run("convert", &recipe, &parsed.input, &output, None)
 }
 
+const METADATA_USAGE: &str = "reeldeck metadata <file> [--title <text>] [--description <text>] \
+     [--tag <word> …] [--clear] [--out <file>]";
+
+struct MetadataArgs {
+    input: PathBuf,
+    metadata: Option<rd_core::Metadata>,
+    out: Option<PathBuf>,
+}
+
+fn parse_metadata_args(args: &[String]) -> Result<MetadataArgs, u8> {
+    let fail = |msg: String| {
+        eprintln!("reeldeck metadata: {msg}");
+        eprintln!("usage: {METADATA_USAGE}");
+        2u8
+    };
+    let mut input = None;
+    let mut metadata = rd_core::Metadata::default();
+    let mut out = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        let mut value = || {
+            i += 1;
+            args.get(i)
+                .cloned()
+                .ok_or_else(|| fail(format!("missing value for {arg}")))
+        };
+        match arg {
+            "--title" => metadata.title = Some(value()?),
+            "--description" => metadata.description = Some(value()?),
+            "--tag" => metadata.tags.push(value()?),
+            "--clear" => metadata.clear_source = true,
+            "--out" => out = Some(PathBuf::from(value()?)),
+            flag if flag.starts_with("--") => return Err(fail(format!("unknown flag '{flag}'"))),
+            _ if input.is_some() => return Err(fail(format!("unexpected extra argument '{arg}'"))),
+            _ => input = Some(PathBuf::from(arg)),
+        }
+        i += 1;
+    }
+    let input = input.ok_or_else(|| fail("name the file".to_string()))?;
+    // No edit flags: show the file's metadata instead.
+    let metadata = if metadata == rd_core::Metadata::default() {
+        if out.is_some() {
+            return Err(fail("--out needs at least one change to write".to_string()));
+        }
+        None
+    } else {
+        metadata.validate().map_err(|e| fail(e.to_string()))?;
+        Some(metadata)
+    };
+    Ok(MetadataArgs {
+        input,
+        metadata,
+        out,
+    })
+}
+
+fn cmd_metadata(args: &[String]) -> i32 {
+    let parsed = match parse_metadata_args(args) {
+        Ok(p) => p,
+        Err(c) => return c as i32,
+    };
+    let Some(metadata) = parsed.metadata else {
+        return match rd_analyze::format_tags(&parsed.input) {
+            Ok(tags) if tags.is_empty() => {
+                println!("{}: no container metadata", parsed.input.display());
+                0
+            }
+            Ok(tags) => {
+                println!("{}:", parsed.input.display());
+                for (key, value) in tags {
+                    println!("  {key}: {value}");
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("reeldeck metadata: {e}");
+                1
+            }
+        };
+    };
+    let sha = match hash_source("metadata", &parsed.input) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    // A metadata change copies the streams untouched into the same
+    // container, as a new file.
+    let mut recipe = rd_core::Recipe::new(
+        parsed.input.display().to_string(),
+        rd_core::ExportPreset::StreamCopy,
+    );
+    recipe.source_sha256 = Some(sha);
+    recipe.metadata = Some(metadata);
+    recipe.notes = "written by reeldeck metadata".to_string();
+    if let Err(e) = recipe.validate() {
+        eprintln!("reeldeck metadata: {e}");
+        return 2;
+    }
+    let output = parsed.out.unwrap_or_else(|| {
+        let ext = parsed
+            .input
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "mkv".to_string());
+        PathBuf::from(edited_output_path(&parsed.input, "tagged", None, &ext))
+    });
+    execute_run("metadata", &recipe, &parsed.input, &output, None)
+}
+
 const JOIN_USAGE: &str =
     "reeldeck join <file> <file> [<file> …] (--lossless | --preset <preservation|mezzanine|access>) [--out <file>]";
 
@@ -2067,9 +2188,14 @@ fn cmd_join(args: &[String]) -> i32 {
         eprintln!("reeldeck join: {e}");
         return 2;
     }
-    let output = parsed
-        .out
-        .unwrap_or_else(|| PathBuf::from(edited_output_path(first, "joined", None, parsed.preset)));
+    let output = parsed.out.unwrap_or_else(|| {
+        PathBuf::from(edited_output_path(
+            first,
+            "joined",
+            None,
+            parsed.preset.extension(),
+        ))
+    });
     execute_run("join", &recipe, first, &output, None)
 }
 
@@ -2797,6 +2923,39 @@ mod tests {
     }
 
     #[test]
+    fn metadata_args_show_or_edit() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(
+            parse_metadata_args(&args(&["in.mp4"]))
+                .unwrap()
+                .metadata
+                .is_none(),
+            "no flags shows"
+        );
+        let edit = parse_metadata_args(&args(&[
+            "in.mp4", "--title", "Tape 11", "--tag", "council", "--tag", "1991", "--clear",
+        ]))
+        .unwrap()
+        .metadata
+        .unwrap();
+        assert_eq!(edit.title.as_deref(), Some("Tape 11"));
+        assert_eq!(edit.tags, vec!["council", "1991"]);
+        assert!(edit.clear_source);
+        assert_eq!(
+            parse_metadata_args(&args(&["in.mp4", "--out", "x.mp4"])).err(),
+            Some(2)
+        );
+        assert_eq!(
+            parse_metadata_args(&args(&["in.mp4", "--tag", "a,b"])).err(),
+            Some(2)
+        );
+        assert_eq!(
+            parse_metadata_args(&args(&["in.mp4", "--title", " "])).err(),
+            Some(2)
+        );
+    }
+
+    #[test]
     fn join_args_need_two_files_and_a_mode() {
         let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let ok =
@@ -2839,11 +2998,16 @@ mod tests {
     fn edited_output_names() {
         let p = Path::new("dir/tape.mkv");
         assert_eq!(
-            edited_output_path(p, "cut", None, rd_core::ExportPreset::Access),
+            edited_output_path(p, "cut", None, rd_core::ExportPreset::Access.extension()),
             "tape.cut.mp4"
         );
         assert_eq!(
-            edited_output_path(p, "part", Some(3), rd_core::ExportPreset::StreamCopy),
+            edited_output_path(
+                p,
+                "part",
+                Some(3),
+                rd_core::ExportPreset::StreamCopy.extension()
+            ),
             "tape.part03.mkv"
         );
     }

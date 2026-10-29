@@ -716,6 +716,47 @@ pub fn probe(path: &Path) -> Result<ProbeInfo, AnalyzeError> {
     }
 }
 
+/// A file's container-level metadata tags, as ffprobe reads them. Keys
+/// keep the container's spelling (Matroska upper-cases most of them), so
+/// compare them case-insensitively.
+pub fn format_tags(
+    path: &Path,
+) -> Result<std::collections::BTreeMap<String, String>, AnalyzeError> {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", "format_tags", "-of", "json"])
+        .arg(path)
+        .output()
+        .map_err(|_| AnalyzeError::ToolUnavailable("ffprobe".to_string()))?;
+    if !output.status.success() {
+        return Err(AnalyzeError::ToolFailed {
+            tool: "ffprobe",
+            detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    parse_format_tags(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Parse `ffprobe -show_entries format_tags -of json` output.
+pub fn parse_format_tags(
+    text: &str,
+) -> Result<std::collections::BTreeMap<String, String>, AnalyzeError> {
+    #[derive(Deserialize)]
+    struct Out {
+        #[serde(default)]
+        format: Option<Format>,
+    }
+    #[derive(Deserialize)]
+    struct Format {
+        #[serde(default)]
+        tags: std::collections::BTreeMap<String, String>,
+    }
+    let out: Out = serde_json::from_str(text).map_err(|e| AnalyzeError::Parse {
+        what: "ffprobe format tags",
+        detail: e.to_string(),
+    })?;
+    Ok(out.format.map(|f| f.tags).unwrap_or_default())
+}
+
 /// The time of the last video keyframe at or before `secs`: where a
 /// lossless (stream-copy) cut requested at `secs` really starts.
 ///
@@ -996,6 +1037,18 @@ TAG:lavfi.signalstats.TOUT=0.42
 TAG:lavfi.signalstats.BRNG=0.010
 [/FRAME]
 ";
+
+    #[test]
+    fn format_tags_parse_with_container_spelling() {
+        let tags =
+            parse_format_tags(r#"{"format": {"tags": {"title": "My Title", "KEYWORDS": "a, b"}}}"#)
+                .unwrap();
+        assert_eq!(tags.get("title").map(String::as_str), Some("My Title"));
+        assert_eq!(tags.get("KEYWORDS").map(String::as_str), Some("a, b"));
+        assert!(parse_format_tags(r#"{"format": {}}"#).unwrap().is_empty());
+        assert!(parse_format_tags("{}").unwrap().is_empty());
+        assert!(parse_format_tags("not json").is_err());
+    }
 
     #[test]
     fn keyframe_times_parse_and_pick_the_snap_point() {

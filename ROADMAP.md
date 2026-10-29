@@ -64,7 +64,8 @@ engine, under the same proof rules (plan §3.7–§3.10).
   frame rate and bitrate settings and saved profiles; incompatible
   combinations refused with the reason (`reeldeck convert`). Conversion
   settings on cut/split/join outputs are not exposed in the CLI yet
-- Metadata editing (title, description, tags)
+- [x] Metadata editing (title, description, tags), with the output read
+  back and unkept fields logged (`reeldeck metadata`)
 - [x] Recipe schema 2 for edit operations; schema-1 recipes keep working
 - Lossless remux into another container (the stream-copy intent with no
   ranges) exists

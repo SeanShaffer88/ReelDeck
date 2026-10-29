@@ -189,9 +189,13 @@ order, with every parameter, re-runnable, and proved.
 - **Transitions, effects, colour.** Transitions between joined clips;
   built-in effects; colour correction (levels, white balance, lift/gamma/
   gain) and grading. These are **creative operations** (§3.9).
-- **Metadata and subtitles.** Container title, description and tags;
-  subtitle tracks added from files or kept from the source. Metadata
-  edits are recorded like any other operation.
+- **Metadata and subtitles.** Container title, description and tags
+  (optionally clearing the source's own fields first), written with any
+  intent; a metadata-only change is a stream-copy remux, so the picture
+  and sound are untouched. Containers differ in what they keep, so the
+  executor reads the output back and logs every field that did not
+  survive; it never assumes a write succeeded. Subtitle tracks added
+  from files or kept from the source (v0.5).
 - **Conversion and output settings.** The *custom* intent re-encodes to
   the recipe's own output settings: container (MP4, MOV, MKV, AVI),
   video codec (H.264, H.265, MPEG-4 Part 2, ProRes, FFV1), audio codec
@@ -255,8 +259,8 @@ rd-pipeline   Filter-graph / VapourSynth-script planning, two-pass
 rd-ui         Shell state model (queue / viewer / chain / jobs); no
               framework code yet — see the GUI decision below
 reeldeck      CLI binary: inspect | plan | export | preview | verify |
-              rerun | batch | cut | split | join | convert | hash |
-              version
+              rerun | batch | cut | split | join | convert |
+              metadata | hash | version
 ```
 
 - **Engine:** FFmpeg (a pinned build; note that the stabilization library

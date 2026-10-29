@@ -27,7 +27,7 @@ pub use log::{ExportLog, SourceRecord};
 pub use output::{AudioCodec, Container, OutputError, OutputSettings, Rate, VideoCodec};
 pub use recipe::{
     parse_time, CropRect, DeinterlaceEngine, DenoiseEngine, ExportPreset, FieldOrder, JoinPart,
-    KeepRange, Operation, OutputRate, Recipe, RecipeError, MIN_RECIPE_SCHEMA_VERSION,
-    RECIPE_SCHEMA_VERSION,
+    KeepRange, Metadata, Operation, OutputRate, Recipe, RecipeError, METADATA_MAX_CHARS,
+    MIN_RECIPE_SCHEMA_VERSION, RECIPE_SCHEMA_VERSION,
 };
 pub use verify::{verify_export, verify_joined_export, Check, CheckStatus, VerificationReport};

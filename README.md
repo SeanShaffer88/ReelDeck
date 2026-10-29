@@ -96,7 +96,7 @@ leaves the disk.
 | `crates/rd-pipeline` | Planning: recipe → filter strings, two-pass stabilization plan, export argument vectors. Plans only; never executes. |
 | `crates/rd-run` | Execution: runs plans with FFmpeg (fixity gate, never-overwrite, measured progress, cancellation) and writes the recipe + export-log proof beside every output; runs resumable batches. |
 | `crates/rd-ui` | Interface state model and design system: workflow stages and gates, per-source chain state with undo/redo, chain editing and guards, timeline lanes/marks, formatting, preferences, commands, pre-export checks — plus a framework-neutral shell prototype. |
-| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `batch`, `cut`, `split`, `join`, `convert`, `hash`, `version`. |
+| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `batch`, `cut`, `split`, `join`, `convert`, `metadata`, `hash`, `version`. |
 
 ## Building from source
 
@@ -305,6 +305,19 @@ saved as a profile for a device or platform and loaded with
 ```sh
 cargo run -p reeldeck -- convert tape.mkv --settings profiles/web-mp4.json
 cargo run -p reeldeck -- convert clip.mov --container avi --size 640x480 --fps 25 --video-bitrate 3000
+```
+
+`metadata` shows a file's container metadata, or writes a copy with a
+new title, description and tags. The copy is a new file in the same
+container with the streams copied untouched; `--clear` drops the
+source's own file-level fields first. Containers don't all keep every
+field — AVI, for example, keeps only the title — so the output is read
+back after the run, and any field that didn't survive is printed and
+recorded in the export log.
+
+```sh
+cargo run -p reeldeck -- metadata tape11.mp4
+cargo run -p reeldeck -- metadata tape11.mp4 --title "Council meeting, 1991" --tag council --tag 1991
 ```
 
 Recipes that use these edit fields are written as schema 2; schema-1

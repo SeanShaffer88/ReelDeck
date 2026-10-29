@@ -722,6 +722,16 @@ fn run_plan_noted(
             if let Some(warning) = stream_warning {
                 warnings.push(warning);
             }
+            // Containers do not all keep every metadata field; read the
+            // output back so the log says which did not survive.
+            if let Some(metadata) = &ctx.recipe.metadata {
+                match rd_analyze::format_tags(&ctx.output) {
+                    Ok(tags) => warnings.extend(metadata.unkept_fields(&tags)),
+                    Err(e) => warnings.push(format!(
+                        "metadata: could not be read back from the output, so whether it was kept is unknown: {e}"
+                    )),
+                }
+            }
             let mut log = ctx.build_log();
             log.frames_processed = outcome.latest.frame;
             log.frames_dropped = outcome.latest.drop_frames;

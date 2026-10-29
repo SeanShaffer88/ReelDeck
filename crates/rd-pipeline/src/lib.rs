@@ -479,6 +479,33 @@ fn check_output_extension(recipe: &Recipe, output: &str) -> Result<(), PipelineE
     }
 }
 
+/// Metadata arguments for a recipe: clear the source's file-level
+/// metadata when asked, then one `-metadata key=value` per field. A
+/// QuickTime output also gets `-movflags use_metadata_tags`, without
+/// which the muxer keeps only the title.
+fn metadata_args(recipe: &Recipe, output: &str) -> Vec<String> {
+    let Some(metadata) = &recipe.metadata else {
+        return Vec::new();
+    };
+    let mut args = Vec::new();
+    if metadata.clear_source {
+        args.extend(["-map_metadata".to_string(), "-1".to_string()]);
+    }
+    for (key, value) in metadata.fields() {
+        args.extend(["-metadata".to_string(), format!("{key}={value}")]);
+    }
+    let mov = match &recipe.output {
+        Some(settings) => settings.container == rd_core::Container::Mov,
+        None => std::path::Path::new(output)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("mov")),
+    };
+    if mov && !metadata.fields().is_empty() {
+        args.extend(["-movflags".to_string(), "use_metadata_tags".to_string()]);
+    }
+    args
+}
+
 /// The encoders an argument vector asks for (`-c:v` / `-c:a` values
 /// other than `copy`), so an executor can check the FFmpeg build has them.
 pub fn encoders_in(args: &[String]) -> Vec<String> {
@@ -626,6 +653,7 @@ pub fn export_plan_with_facts(
         // the output starts at zero instead of at the cut point.
         args.extend(["-avoid_negative_ts".to_string(), "make_zero".to_string()]);
     }
+    args.extend(metadata_args(recipe, output));
     args.push("-y".to_string());
     args.push(output.to_string());
     Ok(ExportPlan {
@@ -763,6 +791,7 @@ fn join_plan(
         ));
     }
     args.extend(codec_args(recipe));
+    args.extend(metadata_args(recipe, output));
     args.push("-y".to_string());
     args.push(output.to_string());
     Ok(ExportPlan {
@@ -869,6 +898,7 @@ pub fn preview_plan(
         args.extend(["-vf".to_string(), chain.clone()]);
     }
     args.extend(codec_args(recipe));
+    args.extend(metadata_args(recipe, output));
     args.push("-y".to_string());
     args.push(output.to_string());
     Ok(ExportPlan {
@@ -1212,6 +1242,36 @@ mod tests {
         assert!(
             export_plan(&recipe, "in.mov", "out").is_ok(),
             "no extension: -f decides"
+        );
+    }
+
+    #[test]
+    fn golden_metadata_is_written_last_and_mov_keeps_custom_keys() {
+        let mut recipe = Recipe::new("in.mp4", ExportPreset::StreamCopy);
+        recipe.metadata = Some(rd_core::Metadata {
+            title: Some("Tape 11".into()),
+            description: None,
+            tags: vec!["council".into(), "1991".into()],
+            clear_source: true,
+        });
+        assert_eq!(
+            args(&export_plan(&recipe, "in.mp4", "out.mkv").unwrap()),
+            "ffmpeg -hide_banner -i in.mp4 -map 0 -c copy -map_metadata -1 -metadata title=Tape 11 \
+             -metadata keywords=council, 1991 -y out.mkv"
+        );
+        let mov = args(&export_plan(&recipe, "in.mp4", "out.mov").unwrap());
+        assert!(
+            mov.ends_with("-movflags use_metadata_tags -y out.mov"),
+            "{mov}"
+        );
+        recipe.metadata = Some(rd_core::Metadata {
+            clear_source: true,
+            ..Default::default()
+        });
+        let cleared = args(&export_plan(&recipe, "in.mp4", "out.mov").unwrap());
+        assert!(
+            cleared.ends_with("-map_metadata -1 -y out.mov"),
+            "no fields, no movflags: {cleared}"
         );
     }
 

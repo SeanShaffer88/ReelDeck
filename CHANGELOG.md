@@ -39,6 +39,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Metadata editing. Recipe schema 2 adds `metadata` (title,
+  description, tags, and `clear_source` to drop the source's file-level
+  fields first), valid with any intent. The planner writes the fields
+  last (`-map_metadata -1` when clearing; `-movflags use_metadata_tags`
+  for QuickTime outputs, without which only the title survives). After
+  a successful run the executor reads the output's tags back
+  (`rd_analyze::format_tags`) and records every field the container
+  did not keep as a `metadata:` warning in the export log
+  (`Metadata::unkept_fields`). New CLI command
+  `reeldeck metadata <file> [--title …] [--description …] [--tag …]
+  [--clear] [--out …]`: with no flags it prints the file's metadata;
+  otherwise it writes a stream-copied copy in the same container.
+  `edited_output_path` now takes an extension. No new dependency.
+
 - Conversion with output settings. `rd-core` gains `OutputSettings`
   (container, video codec, audio codec or none, optional size, frame
   rate and bitrates) with a conservative compatibility table, and the

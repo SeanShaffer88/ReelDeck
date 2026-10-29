@@ -48,6 +48,8 @@ pub enum RecipeError {
     OutputSettingsMismatch,
     #[error("output settings: {0}")]
     BadOutput(#[from] crate::output::OutputError),
+    #[error("metadata: {0}")]
+    BadMetadata(String),
     #[error("source SHA-256 is not a 64-character hex string: {0}")]
     BadSourceHash(String),
     #[error("denoise {field} strength {value} is outside the allowed range 0.0..=20.0")]
@@ -349,6 +351,102 @@ pub struct Recipe {
     /// Output settings for the custom intent (schema 2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<crate::output::OutputSettings>,
+    /// File-level metadata to write into the output (schema 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Metadata>,
+}
+
+/// File-level metadata written into an output. Containers do not all
+/// keep every field; the executor reads the output back and records any
+/// field that did not survive.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Metadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Keywords, written as one comma-separated field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Drop the source's file-level metadata before writing these
+    /// fields. Stream-level metadata (such as a track's language) stays.
+    #[serde(default)]
+    pub clear_source: bool,
+}
+
+/// Longest metadata value accepted, in characters.
+pub const METADATA_MAX_CHARS: usize = 4096;
+
+impl Metadata {
+    /// The fields to write as FFmpeg metadata keys, in a fixed order.
+    pub fn fields(&self) -> Vec<(&'static str, String)> {
+        let mut fields = Vec::new();
+        if let Some(title) = &self.title {
+            fields.push(("title", title.clone()));
+        }
+        if let Some(description) = &self.description {
+            fields.push(("description", description.clone()));
+        }
+        if !self.tags.is_empty() {
+            fields.push(("keywords", self.tags.join(", ")));
+        }
+        fields
+    }
+
+    /// What did not survive, given the output's tags as read back
+    /// (keys compared case-insensitively, since containers spell them
+    /// differently). One sentence per field; empty when all survived.
+    pub fn unkept_fields(&self, tags: &std::collections::BTreeMap<String, String>) -> Vec<String> {
+        let mut problems = Vec::new();
+        for (key, wanted) in self.fields() {
+            let found = tags
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, v)| v);
+            match found {
+                None => problems.push(format!(
+                    "metadata: the output container did not keep the {key} field"
+                )),
+                Some(got) if got.trim() != wanted.trim() => problems.push(format!(
+                    "metadata: the output's {key} reads back as {got:?}, not {wanted:?}"
+                )),
+                Some(_) => {}
+            }
+        }
+        problems
+    }
+
+    pub fn validate(&self) -> Result<(), RecipeError> {
+        let bad = |detail: String| RecipeError::BadMetadata(detail);
+        if self.fields().is_empty() && !self.clear_source {
+            return Err(bad(
+                "nothing to change: set a title, description or tag, or clear the source's metadata"
+                    .to_string(),
+            ));
+        }
+        for (key, value) in [("title", &self.title), ("description", &self.description)] {
+            if let Some(v) = value {
+                if v.trim().is_empty() {
+                    return Err(bad(format!(
+                        "the {key} is empty; omit it to leave it unchanged"
+                    )));
+                }
+                if v.chars().count() > METADATA_MAX_CHARS {
+                    return Err(bad(format!(
+                        "the {key} is longer than {METADATA_MAX_CHARS} characters"
+                    )));
+                }
+            }
+        }
+        for tag in &self.tags {
+            if tag.trim().is_empty() || tag.contains(',') || tag.contains('\n') {
+                return Err(bad(format!(
+                    "tag {tag:?} is not usable: tags are written as one comma-separated field, so each must be non-empty and contain no comma or line break"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A source joined after the recipe's own source.
@@ -439,6 +537,7 @@ impl Recipe {
             keep: Vec::new(),
             join: Vec::new(),
             output: None,
+            metadata: None,
         }
     }
 
@@ -486,6 +585,7 @@ impl Recipe {
         !self.keep.is_empty()
             || !self.join.is_empty()
             || self.output.is_some()
+            || self.metadata.is_some()
             || matches!(
                 self.export_preset,
                 ExportPreset::StreamCopy | ExportPreset::Custom
@@ -515,6 +615,9 @@ impl Recipe {
             if self.export_preset == ExportPreset::Custom || self.output.is_some() {
                 return Err(RecipeError::NeedsSchema2("output settings"));
             }
+            if self.metadata.is_some() {
+                return Err(RecipeError::NeedsSchema2("metadata"));
+            }
         }
         match (&self.export_preset, &self.output) {
             (ExportPreset::Custom, Some(settings)) => settings.validate()?,
@@ -536,6 +639,7 @@ impl Recipe {
         if self.operations.is_empty()
             && self.keep.is_empty()
             && self.join.is_empty()
+            && self.metadata.is_none()
             && !matches!(
                 self.export_preset,
                 ExportPreset::StreamCopy | ExportPreset::Custom
@@ -550,7 +654,11 @@ impl Recipe {
             op.validate()?;
         }
         self.validate_keep()?;
-        self.validate_join()
+        self.validate_join()?;
+        match &self.metadata {
+            Some(metadata) => metadata.validate(),
+            None => Ok(()),
+        }
     }
 
     fn validate_join(&self) -> Result<(), RecipeError> {
@@ -881,6 +989,101 @@ mod tests {
             Err(RecipeError::NeedsSchema2("output settings"))
         );
         assert_eq!(sample_recipe().output_extension(), "mkv");
+    }
+
+    #[test]
+    fn metadata_validates_and_round_trips() {
+        let metadata = Metadata {
+            title: Some("Council meeting, 1991".into()),
+            description: Some("Tape 11, side A".into()),
+            tags: vec!["council".into(), "1991".into()],
+            clear_source: false,
+        };
+        assert_eq!(
+            metadata.fields(),
+            vec![
+                ("title", "Council meeting, 1991".to_string()),
+                ("description", "Tape 11, side A".to_string()),
+                ("keywords", "council, 1991".to_string()),
+            ]
+        );
+        let mut recipe = Recipe::new("in.mp4", ExportPreset::StreamCopy);
+        recipe.metadata = Some(metadata.clone());
+        assert!(recipe.validate().is_ok());
+        assert!(recipe.uses_schema2());
+        assert_eq!(
+            Recipe::from_json(&recipe.to_json().unwrap()).unwrap(),
+            recipe
+        );
+
+        let mut alone = Recipe::new("in.mp4", ExportPreset::Access);
+        alone.metadata = Some(metadata);
+        assert!(
+            alone.validate().is_ok(),
+            "a metadata edit is an explicit action"
+        );
+        alone.schema_version = 1;
+        assert_eq!(alone.validate(), Err(RecipeError::NeedsSchema2("metadata")));
+
+        let invalid = |m: Metadata| m.validate().unwrap_err().to_string();
+        assert!(invalid(Metadata::default()).contains("nothing to change"));
+        assert!(invalid(Metadata {
+            title: Some(" ".into()),
+            ..Default::default()
+        })
+        .contains("empty"));
+        assert!(invalid(Metadata {
+            tags: vec!["a,b".into()],
+            ..Default::default()
+        })
+        .contains("comma"));
+        assert!(invalid(Metadata {
+            title: Some("x".repeat(METADATA_MAX_CHARS + 1)),
+            ..Default::default()
+        })
+        .contains("longer"));
+        assert!(Metadata {
+            clear_source: true,
+            ..Default::default()
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn unkept_metadata_fields_are_named() {
+        let metadata = Metadata {
+            title: Some("T".into()),
+            description: Some("D".into()),
+            tags: vec!["a".into()],
+            clear_source: false,
+        };
+        let tags = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        assert!(metadata
+            .unkept_fields(&tags(&[
+                ("title", "T"),
+                ("DESCRIPTION", "D"),
+                ("KEYWORDS", "a")
+            ]))
+            .is_empty());
+        let avi = metadata.unkept_fields(&tags(&[("title", "T"), ("software", "x")]));
+        assert_eq!(avi.len(), 2);
+        assert!(avi[0].contains("did not keep the description field"));
+        assert!(avi[1].contains("did not keep the keywords field"));
+        let changed = metadata.unkept_fields(&tags(&[
+            ("title", "Other"),
+            ("description", "D"),
+            ("keywords", "a"),
+        ]));
+        assert_eq!(
+            changed,
+            vec!["metadata: the output's title reads back as \"Other\", not \"T\"".to_string()]
+        );
     }
 
     #[test]
