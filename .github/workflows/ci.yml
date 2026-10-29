@@ -21,6 +21,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Windows loads media_kit.dll from beside the executable, so
+      # the test binaries (target/debug/deps) and the release CLI
+      # need the vendored DLL staged next to them before they run.
+      - name: Stage MediaKit DLL beside test and release binaries
+        run: |
+          New-Item -ItemType Directory -Force target/debug/deps, target/debug, target/release | Out-Null
+          Copy-Item crates/rd-analyze/native/media_kit.dll target/debug/deps/
+          Copy-Item crates/rd-analyze/native/media_kit.dll target/debug/
+          Copy-Item crates/rd-analyze/native/media_kit.dll target/release/
+
       - name: Test
         run: cargo test --workspace
 
