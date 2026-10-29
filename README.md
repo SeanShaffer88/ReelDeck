@@ -82,7 +82,8 @@ leaves the disk.
 | Crate | Role |
 | ----- | ---- |
 | `crates/rd-core` | Pure logic: recipe + export-log model, validation, SHA-256 fixity, export verification. No FFI. |
-| `crates/rd-analyze` | ffprobe / signalstats / detect-filter / idet parsing into a typed inspection model, plus the sampled-range `analyze` pass that runs the tools. |
+| `crates/rd-analyze` | ffprobe / signalstats / detect-filter / idet parsing into a typed inspection model, plus the sampled-range `analyze` pass that runs the tools. Its header-level probe asks MediaKit first and falls back to ffprobe. |
+| `crates/rd-mediakit` | Safe wrapper over the MediaKit DLL (vendored under `crates/rd-analyze/native/`): header-level media probing on Windows, an honest unavailable error elsewhere. The workspace's only FFI crate. |
 | `crates/rd-pipeline` | Planning: recipe → filter strings, two-pass stabilization plan, export argument vectors. Plans only; never executes. |
 | `crates/rd-run` | Execution: runs plans with FFmpeg (fixity gate, never-overwrite, measured progress, cancellation) and writes the recipe + export-log proof beside every output. |
 | `crates/rd-ui` | Interface state model and design system: workflow stages and gates, per-source chain state with undo/redo, chain editing and guards, timeline lanes/marks, formatting, preferences, commands, pre-export checks — plus a framework-neutral shell prototype. |
@@ -92,6 +93,9 @@ leaves the disk.
 
 Requirements: Rust 1.80 or newer. Inspection and rendering additionally
 need FFmpeg (which provides `ffmpeg`/`ffprobe`) on the PATH at runtime.
+On Windows, `media_kit.dll` (vendored in `crates/rd-analyze/native/`)
+must sit beside the executable at run time; see that folder's README
+for the provenance and hashes.
 
 ```sh
 cargo build --workspace --release

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- MediaKit probe at intake: `rd-analyze`'s probe now asks MediaKit
+  for header-level facts first (container, duration, bitrate, and
+  per-stream codec, dimensions, sample rate, and channels) and
+  falls back to ffprobe when MediaKit is unavailable, does not
+  recognize the container, or reports an error — a MediaKit failure
+  is never itself a hard failure. Frame rate and field order are
+  not header facts MediaKit reports, so they stay unset in a
+  MediaKit-sourced result. The behaviour is reached through the
+  existing `reeldeck inspect` command; no new command or flag was
+  added. New workspace crate `rd-mediakit` holds the FFI
+  declarations and the safe wrapper over the MediaKit DLL
+  (workspace-internal dependency, no new external dependency), so
+  `rd-analyze` keeps its no-unsafe rule; the MediaKit v0.1.0 DLL
+  and import library are vendored under
+  `crates/rd-analyze/native/` with their SHA-256 hashes recorded
+  there. On non-Windows platforms the MediaKit probe reports
+  itself unavailable and the ffprobe path is used exactly as
+  before.
+
 ### Changed
 
 - `rd-ui` now depends on `rd-analyze` and `rd-pipeline` (workspace-internal
@@ -14,41 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   show the planner's exact filter string and the analysis model's real
   measurements rather than re-deriving either, so the panel cannot disagree
   with what the executor will run.
-- `rd-ui` now also depends on `rd-run` (workspace-internal; no new external
-  dependency and no dependency cycle, since `rd-run` does not depend back).
-  Justification: the job journal consumes the executor's exact `Progress`
-  callback payload and `RunReport` outcome types instead of re-deriving
-  them, so the model's progress and proof records cannot drift from the
-  engine's contract.
-- `ShellModel.jobs: Vec<JobSummary>` is replaced by a persisted
-  `journal: JobJournal` owning full job records and lifecycle. The field
-  is `#[serde(default)]`, so saved shell state written before the journal
-  still deserializes; `JobSummary` remains as the bottom-panel projection.
 - License: GPL-2.0-only → MIT (maintainer decision, 2026-10-20).
 
 ### Added
 
-- Model-side engine binding: a `JobJournal` in `rd-ui` (`jobs.rs`) that
-  owns the job lifecycle `Queued → Running → terminal`, with a visible
-  `Cancelling` state while cooperative cancellation propagates. Progress
-  is measured only — `JobProgress::from_measured` builds each snapshot
-  directly from an `rd_run::Progress` block and derives a percentage only
-  from a known nonzero frame total (clamped at 100); without a total it
-  stays `None`, rendered as `measuring…`, and nothing is interpolated or
-  estimated. Late progress blocks keep arriving while a cancel drains and
-  never reset the Cancelling state. Successful runs store a proof-bearing
-  `JobOutcome` converted from `rd_run::RunReport` (output, output hash,
-  frame count, recipe and export-log sidecars, warnings); the journal
-  retains at most 100 entries, evicting the oldest terminal row and never
-  an active job. Illegal transitions and unknown ids return `JobError`
-  rather than panicking or no-op'ing. Only a succeeded Preview or Export
-  writes evidence back to its source (the preview gate opens; the output
-  is named for the Prove stage); failed and cancelled jobs change no
-  evidence. The model spawns nothing: the worker thread, the
-  `Arc<AtomicBool>` cancel flag and the callback wiring belong to the
-  shipping shell binding layer. The prototype's simulated driver and job
-  panel run the same state machine in `js/model.js`, including the
-  Cancelling drain, six lifecycle words and the 100-entry cap.
 - Per-source shell state in `rd-ui`: `ShellModel` now carries one
   `SourceState` per queue row (parallel to the queue) instead of a single
   chain, so each source keeps its own recipe, preview evidence, expert
