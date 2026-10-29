@@ -45,27 +45,70 @@ done when its criteria pass, not when its code merely compiles.
   step, stop at the failed file and resume there, re-verified skips
 - VapourSynth/QTGMC as the optional archival tier
 
-## v0.4 — Cutting and throughput
+Editing joins restoration from v0.4 on: a second workspace on the same
+engine, under the same proof rules (plan §3.7–§3.10).
 
-- Lossless, keyframe-snapped segment export (stream copy) with its own
-  proof, kept distinct from a re-encode
-- Batch queue: copy settings across sources, and the queue in the shell
-  (per-file state and resume landed in v0.3)
+## v0.4 — Cut, join, convert
+
+- Trim to a range, remove unwanted parts (keep several ranges), and split
+  into one output per range — frame-accurate (re-encode, can carry the
+  restoration chain) and lossless (stream copy, keyframe-snapped, stated
+  before the run and recorded in the log)
+- Join / merge several sources (AVI, MP4, MOV, MKV, ASF, …) into one
+  output, each source pinned by hash; lossless when streams match
+- Format conversion between containers and codecs, with resolution,
+  frame rate and bitrate/quality settings; incompatible combinations
+  refused with the reason
+- Metadata editing (title, description, tags)
+- Recipe schema 2 for edit operations; schema-1 recipes keep working
+- Batch queue: copy settings across sources
 - Proxy media for scrubbing long captures
 - Chapter and attachment preservation for Matroska masters
 - Scene-change detection as timeline markers
+
+## v0.5 — Audio and subtitles
+
+- Add, remove, or replace audio tracks; per-track gain and mixing
+- Audio codec choice; loudness measured before and after
+- Subtitle tracks: add from file, keep, or remove
+
+## v0.6 — The editor
+
+- Shipping GUI: framework decision, then the shell the prototype proves
+- Multi-track timeline with preview, undo, and keyboard-first editing
+- Transitions between clips; built-in effects
+- Colour correction (levels, white balance, lift/gamma/gain) and grading
+- Output profiles for devices and platforms
+- Creative operations refused in Preservation Master exports
+- Windows, macOS and Linux builds; installer and portable versions
 - Quality-control overlays for review copies (never in a preservation
   master)
 
+## v0.7 — Capture
+
+- Capture from USB, HDV/FireWire and capture-card devices, hashed as
+  written, with dropped/duplicated frames reported from device counters
+
+## v0.8 — HDR, plugins, advanced audio
+
+- HDR10/HLG pass-through with metadata preserved; HDR grading
+- Plugins: name, version and file hash recorded per use; refused in
+  Preservation Master; Prove marks plugin-dependent outputs
+- Advanced audio editing and mixing tools
+
+## v0.9 — Multi-camera
+
+- Multi-camera editing, angles synced by timecode or audio
+
 ## Later / maybe never
 
-- Plug-in filters
 - Experimental synthesis module (labelled, opt-in, excluded from
   Preservation exports)
 - Network render nodes
 
 ## Explicit non-goals
 
-Inventing detail in a preservation export; one-click "enhance" with no
-record of what happened; cloud processing, accounts, or telemetry of any
-kind; modifying or overwriting a source file, ever.
+Inventing detail in a preservation export; creative operations or plugins
+in a preservation export; one-click "enhance" with no record of what
+happened; cloud processing, accounts, or telemetry of any kind; modifying
+or overwriting a source file, ever; stereoscopic 3D editing.

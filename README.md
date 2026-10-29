@@ -7,6 +7,15 @@ production teams. It exists for footage that is old, interlaced, noisy, shaky,
 or otherwise difficult — and for people who need to say, later and with
 evidence, exactly what was done to it.
 
+Restoration is the core; editing sits beside it. From v0.4 the roadmap
+adds cutting, trimming, splitting, joining, conversion, audio and
+subtitle tracks, then a multi-track editor with transitions, effects and
+colour tools, capture, and HDR — all under the same rules: sources are
+never written, and every export ships its proof. Creative operations
+(transitions, effects, grading looks, plugins) are allowed in edit and
+access exports, never in a Preservation Master. See the
+[roadmap](ROADMAP.md) for what exists today and what is planned.
+
 > **Status: v0.2 in progress.** This repository holds the workspace, the
 > recipe/export-log data model, frame-analysis parsing and reporting,
 > pipeline planning, render execution with proof sidecars, a small CLI —

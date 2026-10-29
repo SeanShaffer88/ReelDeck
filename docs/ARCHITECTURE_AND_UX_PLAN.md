@@ -27,13 +27,21 @@ detail and break reproducibility. If synthesis ever arrives, it ships as a
 clearly labelled experimental module, off by default, and never in a
 Preservation export.
 
+**Restoration first, editing beside it.** ReelDeck is also a video
+editor: cutting, trimming, splitting, joining, audio tracks, transitions,
+effects, colour work, conversion, metadata, subtitles, and capture (§3.7–
+§3.10). Editing is a second workspace on the same engine and under the same
+rules: sources are never written, and every export — an edit as much as a
+restoration — ships its recipe, export log and hashes. Restoration stays
+the core; editing never weakens it. (Maintainer decision, 2026-10-29.)
+
 ### Who it is for (in order)
 
 1. **Archivists / digitization technicians** — tape and film transfers;
    need quality control, fixity, and a defensible record.
 2. **Small production teams** — rescuing legacy, interlaced, noisy, or shaky
-   footage for a current edit; need preview-before-commit and batch
-   consistency.
+   footage and cutting it into a current piece; need preview-before-commit,
+   batch consistency, and an editor that keeps the record.
 3. *Not v1:* one-click consumer enhancement. Wrong promise, wrong support
    burden.
 
@@ -142,6 +150,76 @@ Alongside every output, in the same folder:
   produce a bit-identical output, or the difference must be documented.
   This is tested, not asserted (§7).
 
+### 3.7 Edit — the second workspace
+
+Editing operations are recipe operations like any other: recorded in
+order, with every parameter, re-runnable, and proved.
+
+- **Cut, trim, split, remove.** A recipe can keep one or more ranges of
+  its source (trim = one range; removing unwanted parts = the ranges
+  between them), in seconds or timecode. *Split* writes one output per
+  range, run as a batch so each part has its own proof.
+  - **Two cut modes, never confused.** *Frame-accurate* cuts re-encode
+    and can carry the restoration chain. *Lossless* cuts copy the streams
+    untouched, so they can only fall on keyframes: the planner snaps each
+    range to the keyframe at or before its start, says so before the run,
+    and records the snapped times in the log. A lossless cut cannot carry
+    filters; the planner refuses that combination instead of re-encoding
+    silently.
+- **Join and merge.** Several sources (AVI, MP4, MOV, MKV, ASF and
+  anything else FFmpeg demuxes) into one output, in order. Every source
+  is pinned by its own SHA-256 in the recipe. Sources whose streams match
+  can be joined losslessly; otherwise the join re-encodes, and the plan
+  shows which.
+- **Audio tracks.** Add, remove, or replace tracks; per-track gain and
+  simple mixing; audio codec choice. Loudness is measured before and
+  after, never asserted.
+- **Transitions, effects, colour.** Transitions between joined clips;
+  built-in effects; colour correction (levels, white balance, lift/gamma/
+  gain) and grading. These are **creative operations** (§3.9).
+- **Metadata and subtitles.** Container title, description and tags;
+  subtitle tracks added from files or kept from the source. Metadata
+  edits are recorded like any other operation.
+- **Conversion and output settings.** Any FFmpeg-supported container and
+  codec pair, with resolution, frame rate, bitrate or quality, and saved
+  output profiles for specific devices or platforms. A conversion the
+  chosen container cannot hold (for example a codec AVI cannot carry) is
+  refused with the reason, not substituted.
+- **Timeline.** Multi-track timeline with preview, keyboard-first, every
+  edit undoable. Automation: everything the GUI does, the CLI and batch
+  manifests can do.
+- **Multi-camera editing** (angles synced by timecode or audio) comes last
+  on the roadmap; it serves new productions more than restoration.
+
+### 3.8 Capture
+
+Digitising tapes is the start of most restoration work, so capture is
+planned after the editing core: USB, HDV/FireWire and capture-card
+sources through the platform's capture APIs. Capture writes a new file,
+hashes it as it is written, and reports dropped and duplicated frames
+from the device's own counters — a capture with drops says so in its log.
+
+### 3.9 Creative operations and plugins
+
+- **Creative operations** (transitions, effects, colour grading looks,
+  plugins) change what the picture shows rather than repairing it. A
+  recipe containing one cannot be exported as a **Preservation Master**;
+  the planner refuses and names the operation. Mezzanine and Access
+  exports may use them, and the export log lists each one.
+- **Plugins** are supported, fenced: each use records the plugin's name,
+  version and file SHA-256 in the export log, a recipe that names a plugin
+  fails loudly if that exact file is absent, and Prove marks the output as
+  plugin-dependent. (Maintainer decision, 2026-10-29.)
+
+### 3.10 HDR and formats
+
+- **HDR:** HDR10 and HLG sources pass through with their transfer,
+  primaries and mastering metadata preserved and recorded; a conversion
+  that would drop HDR metadata says so before the run. HDR grading comes
+  after the colour tools exist.
+- **3D (stereoscopic) editing is out of scope.** (Maintainer decision,
+  2026-10-29: little engine support and little remaining use.)
+
 ## 4. Architecture
 
 A testable core, a CLI that can do everything the GUI can, and the GUI on
@@ -176,6 +254,18 @@ reeldeck      CLI binary: inspect | plan | export | preview | verify |
   it is to be settled by inspecting the project's needs against current
   platform guidance and stating the trade-offs before code is written.
   `rd-ui` holds the state model meanwhile so the decision stays cheap.
+  Cross-platform targets (below) now weigh in favour of a cross-platform
+  shell; the decision record must say how Windows quality is kept.
+- **Platforms:** Windows first; macOS and Linux are supported targets.
+  Core, analysis, planning and execution stay platform-independent; the
+  MediaKit probe is Windows-only and falls back to ffprobe elsewhere.
+  Each platform is claimed only once verified on it. Builds ship as an
+  installer and as a portable folder (no installer, settings beside the
+  binary).
+- **Recipe schema 2:** edit operations (kept ranges, multiple sources,
+  audio tracks, metadata) extend the recipe. Schema-1 recipes still load
+  and re-run unchanged; a recipe using an edit field is written as
+  schema 2 so an older build refuses it instead of ignoring the edit.
 - **Dependencies:** workspace is serde / serde_json / thiserror only.
   SHA-256 is implemented in `rd-core` rather than adding a crate.
   (Stdlib first; new dependencies need written justification.)
@@ -207,6 +297,16 @@ Dense, professional, keyboard-first — an operations board for footage:
   the three exports, GUI shell.
 - **v0.3 — Difficult footage:** two-pass stabilization, denoise, finish,
   batch + rerun + verify, QTGMC tier.
+- **v0.4 — Cut, join, convert:** trim/split/remove ranges (frame-accurate
+  and lossless), join sources, format conversion with output settings,
+  metadata.
+- **v0.5 — Audio and subtitles:** add/remove/replace tracks, mixing,
+  audio codecs, subtitle tracks.
+- **v0.6 — The editor:** shipping GUI with a multi-track timeline,
+  transitions, effects, colour correction and grading, output profiles;
+  macOS and Linux builds; portable builds.
+- **v0.7 — Capture.** **v0.8 — HDR, plugins, advanced audio.**
+  **v0.9 — Multi-camera.**
 
 ## 7. Validation plan
 

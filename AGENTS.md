@@ -35,8 +35,9 @@ and automated contributors alike.
   reported to the user is measured, never fabricated.
 - Local data only, offline-first. No networking, no telemetry, no accounts
   — not behind a flag, not "for diagnostics", not ever.
-- Platform: Windows-first desktop, with core/analyze/pipeline kept
-  platform-independent and fully testable anywhere.
+- Platform: Windows-first desktop; macOS and Linux are supported targets
+  (plan §4). Core/analyze/pipeline/run stay platform-independent and
+  fully testable anywhere; each platform is claimed only once verified.
 
 ## Safety rules (product-specific, non-negotiable)
 
@@ -50,6 +51,13 @@ and automated contributors alike.
 - **Every export writes its recipe and its export log** beside the
   output: source and output SHA-256, tool versions, the exact command,
   frame counts, and warnings. An export without its proof is incomplete.
+- **Creative operations and plugins never reach a Preservation export.**
+  Transitions, effects, grading looks and plugins are allowed in
+  Mezzanine and Access exports only, each listed in the export log; a
+  plugin's use also records its version and file SHA-256.
+- **A lossless cut is never a silent re-encode, and a re-encode is never
+  called lossless.** The plan and the log say which ran, and where a
+  lossless cut moved to a keyframe.
 - Suggested findings (interlacing, anomaly flags) are suggestions. The
   operator confirms; the tool never silently acts on a detection.
 - A plan that cannot be executed exactly as shown — wrong engine, missing

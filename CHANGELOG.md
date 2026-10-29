@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Scope: ReelDeck adds video editing beside restoration (maintainer
+  decision, 2026-10-29). The plan gains §3.7 Edit, §3.8 Capture, §3.9
+  Creative operations and plugins, and §3.10 HDR and formats; the roadmap
+  places cutting/joining/conversion (v0.4), audio and subtitles (v0.5),
+  the editor GUI with transitions, effects and colour (v0.6), capture
+  (v0.7), HDR/plugins/advanced audio (v0.8) and multi-camera (v0.9).
+  AGENTS.md gains two safety rules: creative operations and plugins never
+  reach a Preservation export, and a lossless cut is never a silent
+  re-encode. macOS and Linux become supported targets. Stereoscopic 3D
+  is an explicit non-goal. Plug-in filters move from "maybe never" to
+  v0.8, fenced and recorded.
 - `rd-ui` now depends on `rd-analyze` and `rd-pipeline` (workspace-internal
   crates, no new external dependency). Justification: the interface must
   show the planner's exact filter string and the analysis model's real
