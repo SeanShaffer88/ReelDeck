@@ -115,6 +115,13 @@ pub struct MediaKitStream {
     pub channels: Option<u32>,
     #[serde(default)]
     pub language: Option<String>,
+    /// Video frame rate as an exact `"num/den"` fraction (MediaKit
+    /// 0.2.0+; absent from older results, which parse as `None`).
+    #[serde(default)]
+    pub frame_rate: Option<String>,
+    /// `progressive`, `tt`, `bb`, `tb` or `bt` (MediaKit 0.2.0+).
+    #[serde(default)]
+    pub field_order: Option<String>,
 }
 
 /// Container-level facts in MediaKit's probe result.
@@ -372,6 +379,24 @@ mod tests {
         assert_eq!(audio.codec, None);
         assert_eq!(audio.sample_rate, None);
         assert_eq!(audio.language, None);
+    }
+
+    #[test]
+    fn parses_frame_rate_and_field_order_from_0_2_results() {
+        let probe = parse_probe_json(
+            r#"{"container": "mov", "duration_ms": 2000, "duration_is_estimate": false,
+                "bitrate_bps": 52896, "streams": [
+                {"kind": "video", "codec": "avc1", "width": 320, "height": 240,
+                 "sample_rate": null, "channels": null, "language": null,
+                 "frame_rate": "30000/1001", "field_order": "tt"}]}"#,
+        )
+        .expect("parse");
+        assert_eq!(probe.streams[0].frame_rate.as_deref(), Some("30000/1001"));
+        assert_eq!(probe.streams[0].field_order.as_deref(), Some("tt"));
+        // 0.1 results carry neither field and still parse.
+        let old = parse_probe_json(FULL_FIXTURE).expect("parse");
+        assert_eq!(old.streams[0].frame_rate, None);
+        assert_eq!(old.streams[0].field_order, None);
     }
 
     #[test]

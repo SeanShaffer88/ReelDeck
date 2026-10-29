@@ -19,9 +19,13 @@
 //!   string when the container names no codec — the model field is
 //!   not optional), and width / height / sample_rate / channels
 //!   carry across directly.
-//! - MediaKit has no frame-rate or field-order facts, so
-//!   `avg_frame_rate` and `field_order` stay `None` from this
-//!   source. Its `language` and `duration_is_estimate` facts have no
+//! - `frame_rate` becomes `avg_frame_rate` and `field_order`
+//!   carries across (MediaKit 0.2.0+ reports both in ffprobe's
+//!   notation, from container fields only; older results and
+//!   containers that do not store them leave both `None`). One
+//!   documented difference from ffprobe: for Matroska, MediaKit gives
+//!   the exact stored rate (`500000000/16683333`) where ffprobe
+//!   rounds to `30000/1001`. Its `language` and `duration_is_estimate` facts have no
 //!   field in [`ProbeInfo`]; they remain available on
 //!   [`rd_mediakit::MediaKitProbe`] for callers that need them.
 //!
@@ -55,8 +59,8 @@ pub fn probe_info_from_mediakit(raw: &rd_mediakit::MediaKitProbe, size_bytes: u6
             codec_name: s.codec.clone().unwrap_or_default(),
             width: s.width,
             height: s.height,
-            avg_frame_rate: None,
-            field_order: None,
+            avg_frame_rate: s.frame_rate.clone(),
+            field_order: s.field_order.clone(),
             sample_rate: s.sample_rate,
             channels: s.channels,
         })
@@ -124,8 +128,9 @@ mod tests {
         assert_eq!(video.codec_name, "avc1");
         assert_eq!(video.width, Some(1920));
         assert_eq!(video.height, Some(1080));
-        // MediaKit carries no frame-rate or field-order facts; both
-        // stay unset rather than being filled from another source.
+        // A 0.1-shaped result carries no frame-rate or field-order
+        // facts; both stay unset rather than being filled from
+        // another source.
         assert_eq!(video.avg_frame_rate, None);
         assert_eq!(video.field_order, None);
 
@@ -134,6 +139,23 @@ mod tests {
         assert_eq!(audio.codec_type, "audio");
         assert_eq!(audio.sample_rate, Some(48_000));
         assert_eq!(audio.channels, Some(2));
+    }
+
+    #[test]
+    fn maps_frame_rate_and_field_order() {
+        let raw = rd_mediakit::parse_probe_json(
+            r#"{"container": "matroska", "duration_ms": 2000, "duration_is_estimate": false,
+                "bitrate_bps": null, "streams": [
+                {"kind": "video", "codec": "V_MPEG4/ISO/AVC", "width": 720, "height": 576,
+                 "frame_rate": "25/1", "field_order": "bb"}]}"#,
+        )
+        .expect("parse fixture");
+        let info = probe_info_from_mediakit(&raw, 1);
+        let video = info.first_video().expect("video");
+        assert_eq!(video.avg_frame_rate.as_deref(), Some("25/1"));
+        assert_eq!(video.field_order.as_deref(), Some("bb"));
+        // The rate feeds the same frame estimate the ffprobe path uses.
+        assert_eq!(info.estimated_video_frames(), Some(50));
     }
 
     #[test]
