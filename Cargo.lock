@@ -37,6 +37,7 @@ name = "rd-analyze"
 version = "0.1.0"
 dependencies = [
  "rd-core",
+ "rd-mediakit",
  "serde",
  "serde_json",
  "thiserror",
@@ -44,6 +45,15 @@ dependencies = [
 
 [[package]]
 name = "rd-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "rd-mediakit"
 version = "0.1.0"
 dependencies = [
  "serde",

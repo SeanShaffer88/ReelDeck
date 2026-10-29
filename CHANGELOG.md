@@ -28,6 +28,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- MediaKit probe at intake: `rd-analyze`'s probe now asks MediaKit
+  for header-level facts first (container, duration, bitrate, and
+  per-stream codec, dimensions, sample rate, and channels) and
+  falls back to ffprobe when MediaKit is unavailable, does not
+  recognize the container, or reports an error — a MediaKit failure
+  is never itself a hard failure. Frame rate and field order are
+  not header facts MediaKit reports, so they stay unset in a
+  MediaKit-sourced result. The behaviour is reached through the
+  existing `reeldeck inspect` command; no new command or flag was
+  added. New workspace crate `rd-mediakit` holds the FFI
+  declarations and the safe wrapper over the MediaKit DLL
+  (workspace-internal dependency, no new external dependency), so
+  `rd-analyze` keeps its no-unsafe rule; the MediaKit v0.1.0 DLL
+  and import library are vendored under
+  `crates/rd-analyze/native/` with their SHA-256 hashes recorded
+  there. On non-Windows platforms the MediaKit probe reports
+  itself unavailable and the ffprobe path is used exactly as
+  before.
 - Model-side engine binding: a `JobJournal` in `rd-ui` (`jobs.rs`) that
   owns the job lifecycle `Queued → Running → terminal`, with a visible
   `Cancelling` state while cooperative cancellation propagates. Progress

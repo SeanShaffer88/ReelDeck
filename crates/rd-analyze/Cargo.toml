@@ -9,6 +9,11 @@ description = "ReelDeck frame analysis: ffprobe and signalstats/detect-filter pa
 
 [dependencies]
 rd-core = { path = "../rd-core", version = "0.1.0" }
+# Workspace-internal FFI wrapper over the MediaKit DLL (vendored in
+# native/ below). Justification: header-level probing without a
+# process spawn for the formats MediaKit covers; rd-analyze keeps
+# its unsafe-forbid because every unsafe block lives in rd-mediakit.
+rd-mediakit = { path = "../rd-mediakit", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

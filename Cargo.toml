@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/rd-core",
+    "crates/rd-mediakit",
     "crates/rd-analyze",
     "crates/rd-pipeline",
     "crates/rd-run",
