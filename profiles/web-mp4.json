@@ -1,0 +1,9 @@
+{
+  "container": "mp4",
+  "video_codec": "h264",
+  "audio_codec": "aac",
+  "size": null,
+  "frame_rate": null,
+  "video_bitrate_kbps": null,
+  "audio_bitrate_kbps": 192
+}

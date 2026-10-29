@@ -197,6 +197,8 @@ pub fn parse_streamhash_digest(text: &str) -> Option<String> {
 pub enum RunError {
     #[error("required tool '{0}' is not available on this system; install FFmpeg to render")]
     ToolUnavailable(String),
+    #[error("this FFmpeg build has no '{0}' encoder, which the plan needs; install a build that includes it, or choose a different codec")]
+    EncoderUnavailable(String),
     #[error("input file does not exist: {0}")]
     InputMissing(PathBuf),
     #[error("path already exists and will not be overwritten: {0}")]
@@ -275,6 +277,29 @@ pub fn sidecar_paths(output: &Path) -> (PathBuf, PathBuf) {
     let mut log_os = output.as_os_str().to_owned();
     log_os.push(".export-log.json");
     (PathBuf::from(recipe_os), PathBuf::from(log_os))
+}
+
+/// Encoder names from `ffmpeg -encoders` output: the second field of
+/// each line after the `------` separator.
+pub fn parse_encoders(text: &str) -> Vec<String> {
+    text.lines()
+        .skip_while(|line| line.trim() != "------")
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The encoders the installed FFmpeg build offers, or `None` when the
+/// list cannot be read (the render then reports any missing encoder).
+fn available_encoders() -> Option<Vec<String>> {
+    let out = Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| parse_encoders(&String::from_utf8_lossy(&out.stdout)))
 }
 
 fn ffmpeg_available() -> bool {
@@ -612,6 +637,14 @@ fn run_plan_noted(
     }
     if !ffmpeg_available() {
         return Err(RunError::ToolUnavailable("ffmpeg".to_string()));
+    }
+    let needed = rd_pipeline::encoders_in(&plan.args);
+    if !needed.is_empty() {
+        if let Some(available) = available_encoders() {
+            if let Some(missing) = needed.iter().find(|e| !available.contains(e)) {
+                return Err(RunError::EncoderUnavailable(missing.clone()));
+            }
+        }
     }
 
     // A lossless join reads its sources from a list file, written now
@@ -988,6 +1021,13 @@ fn execute_render(args: &[String], opts: &mut RunOptions) -> Result<RenderOutcom
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn encoder_listing_parses_after_the_separator() {
+        let text = "Encoders:\n V..... = Video\n ------\n V....D libx264              libx264 H.264\n A....D aac                  AAC\n";
+        assert_eq!(parse_encoders(text), vec!["libx264", "aac"]);
+        assert!(parse_encoders("no separator here").is_empty());
+    }
     use super::*;
     use rd_core::{DeinterlaceEngine, ExportPreset, FieldOrder, Operation, OutputRate};
 

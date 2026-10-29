@@ -44,6 +44,10 @@ pub enum RecipeError {
     BadJoin { index: usize, detail: String },
     #[error("kept ranges and joined sources cannot be combined yet; cut each source first, then join the cuts")]
     JoinWithCut,
+    #[error("the custom intent needs output settings, and only the custom intent takes them")]
+    OutputSettingsMismatch,
+    #[error("output settings: {0}")]
+    BadOutput(#[from] crate::output::OutputError),
     #[error("source SHA-256 is not a 64-character hex string: {0}")]
     BadSourceHash(String),
     #[error("denoise {field} strength {value} is outside the allowed range 0.0..=20.0")]
@@ -295,6 +299,10 @@ pub enum ExportPreset {
     /// apply, and a cut can only start on a keyframe. Not a
     /// preservation master: the codecs are whatever the source used.
     StreamCopy,
+    /// Re-encoded to the recipe's own [`crate::OutputSettings`]
+    /// (container, codecs, size, rate, bitrates) — a conversion for a
+    /// device or platform (schema 2). Not a preservation master.
+    Custom,
 }
 
 impl ExportPreset {
@@ -306,6 +314,9 @@ impl ExportPreset {
             ExportPreset::Access => "mp4",
             // Matroska holds nearly any codec the source might carry.
             ExportPreset::StreamCopy => "mkv",
+            // The real extension comes from the settings; see
+            // `Recipe::output_extension`.
+            ExportPreset::Custom => "mkv",
         }
     }
 }
@@ -335,6 +346,9 @@ pub struct Recipe {
     /// output (schema 2). Each is pinned by its own hash when known.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub join: Vec<JoinPart>,
+    /// Output settings for the custom intent (schema 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<crate::output::OutputSettings>,
 }
 
 /// A source joined after the recipe's own source.
@@ -424,6 +438,26 @@ impl Recipe {
             notes: String::new(),
             keep: Vec::new(),
             join: Vec::new(),
+            output: None,
+        }
+    }
+
+    /// A conversion recipe: the custom intent with these settings.
+    pub fn convert(
+        source_name: impl Into<String>,
+        settings: crate::output::OutputSettings,
+    ) -> Self {
+        let mut recipe = Recipe::new(source_name, ExportPreset::Custom);
+        recipe.output = Some(settings);
+        recipe
+    }
+
+    /// The file extension outputs of this recipe should carry: the
+    /// settings' container for the custom intent, else the preset's.
+    pub fn output_extension(&self) -> &'static str {
+        match (&self.export_preset, &self.output) {
+            (ExportPreset::Custom, Some(settings)) => settings.container.extension(),
+            (preset, _) => preset.extension(),
         }
     }
 
@@ -451,7 +485,11 @@ impl Recipe {
     pub fn uses_schema2(&self) -> bool {
         !self.keep.is_empty()
             || !self.join.is_empty()
-            || self.export_preset == ExportPreset::StreamCopy
+            || self.output.is_some()
+            || matches!(
+                self.export_preset,
+                ExportPreset::StreamCopy | ExportPreset::Custom
+            )
     }
 
     pub fn push(mut self, op: Operation) -> Self {
@@ -474,6 +512,16 @@ impl Recipe {
             if !self.join.is_empty() {
                 return Err(RecipeError::NeedsSchema2("joined sources"));
             }
+            if self.export_preset == ExportPreset::Custom || self.output.is_some() {
+                return Err(RecipeError::NeedsSchema2("output settings"));
+            }
+        }
+        match (&self.export_preset, &self.output) {
+            (ExportPreset::Custom, Some(settings)) => settings.validate()?,
+            (ExportPreset::Custom, None) | (_, Some(_)) => {
+                return Err(RecipeError::OutputSettingsMismatch)
+            }
+            _ => {}
         }
         if self.source_name.trim().is_empty() {
             return Err(RecipeError::EmptySourceName);
@@ -488,7 +536,10 @@ impl Recipe {
         if self.operations.is_empty()
             && self.keep.is_empty()
             && self.join.is_empty()
-            && self.export_preset != ExportPreset::StreamCopy
+            && !matches!(
+                self.export_preset,
+                ExportPreset::StreamCopy | ExportPreset::Custom
+            )
         {
             return Err(RecipeError::EmptyOperations);
         }
@@ -799,6 +850,37 @@ mod tests {
                 .validate(),
             Err(RecipeError::BadJoin { index: 1, .. })
         ));
+    }
+
+    #[test]
+    fn conversion_recipes_need_matching_settings() {
+        use crate::output::{Container, OutputSettings, VideoCodec};
+        let recipe = Recipe::convert("in.avi", OutputSettings::for_container(Container::Mp4));
+        assert!(
+            recipe.validate().is_ok(),
+            "a conversion alone is an explicit action"
+        );
+        assert_eq!(recipe.output_extension(), "mp4");
+        assert!(recipe.uses_schema2());
+        let back = Recipe::from_json(&recipe.to_json().unwrap()).unwrap();
+        assert_eq!(back, recipe);
+
+        let mut missing = recipe.clone();
+        missing.output = None;
+        assert_eq!(missing.validate(), Err(RecipeError::OutputSettingsMismatch));
+        let mut stray = sample_recipe();
+        stray.output = Some(OutputSettings::for_container(Container::Mkv));
+        assert_eq!(stray.validate(), Err(RecipeError::OutputSettingsMismatch));
+        let mut bad = recipe.clone();
+        bad.output.as_mut().unwrap().video_codec = VideoCodec::Ffv1;
+        assert!(matches!(bad.validate(), Err(RecipeError::BadOutput(_))));
+        let mut old = recipe;
+        old.schema_version = 1;
+        assert_eq!(
+            old.validate(),
+            Err(RecipeError::NeedsSchema2("output settings"))
+        );
+        assert_eq!(sample_recipe().output_extension(), "mkv");
     }
 
     #[test]

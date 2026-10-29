@@ -1,0 +1,9 @@
+{
+  "container": "mov",
+  "video_codec": "prores",
+  "audio_codec": "pcm16",
+  "size": null,
+  "frame_rate": null,
+  "video_bitrate_kbps": null,
+  "audio_bitrate_kbps": null
+}

@@ -29,6 +29,8 @@
 //!                                 rendered with its own proof
 //!   reeldeck join <a> <b> …        Join files in order into one
 //!                                 output (lossless or re-encoded)
+//!   reeldeck convert <file> …     Convert to a container/codec with
+//!                                 output settings or a saved profile
 //!   reeldeck hash <file>          Print the file's SHA-256
 //!   reeldeck version              Print the version
 
@@ -55,6 +57,7 @@ fn main() -> ExitCode {
         Some("cut") => cmd_cut(&args[1..]),
         Some("split") => cmd_split(&args[1..]),
         Some("join") => cmd_join(&args[1..]),
+        Some("convert") => cmd_convert(&args[1..]),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_usage();
             0
@@ -121,6 +124,12 @@ fn print_usage() {
          \x20                               files must share codecs and picture size); --preset\n\
          \x20                               re-encodes. Different picture sizes, or audio in only\n\
          \x20                               some files, are refused rather than conformed silently\n\
+         \x20 reeldeck convert <file> (--settings <profile.json> | --container <mp4|mov|mkv|avi>)\n\
+         \x20         [--video <codec>] [--audio <codec|none>] [--size <W>x<H>] [--fps <rate>]\n\
+         \x20         [--video-bitrate <kbps>] [--audio-bitrate <kbps>] [--out <file>]\n\
+         \x20                               Re-encode to these output settings (flags override a\n\
+         \x20                               profile). Combinations a container cannot carry are\n\
+         \x20                               refused with the reason; see profiles/ for examples\n\
          \x20 reeldeck hash <file>          Print the file's SHA-256\n\
          \x20 reeldeck version              Print the version"
     );
@@ -661,7 +670,7 @@ fn cmd_plan(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let output = derived_output_path(&recipe.source_name, recipe.export_preset);
+    let output = derived_output_path(&recipe.source_name, recipe.output_extension());
     // Joins and multi-range cuts need facts about their sources; ask
     // the sources when they are reachable.
     let mut facts = Vec::new();
@@ -868,7 +877,7 @@ fn cmd_export(args: &[String]) -> i32 {
     let output = parsed.output.unwrap_or_else(|| {
         PathBuf::from(derived_output_path(
             &recipe.source_name,
-            recipe.export_preset,
+            recipe.output_extension(),
         ))
     });
     execute_run("export", &recipe, &input, &output, None)
@@ -898,7 +907,7 @@ fn cmd_preview(args: &[String]) -> i32 {
         .unwrap_or_else(|| PathBuf::from(&recipe.source_name));
     let output = parsed
         .output
-        .unwrap_or_else(|| PathBuf::from(preview_output_path(&input, recipe.export_preset)));
+        .unwrap_or_else(|| PathBuf::from(preview_output_path(&input, recipe.output_extension())));
     // The recipe the run records is a clone whose notes carry the
     // segment — appended to the operator's notes, never replacing
     // them — so the sidecars show this was a preview, and of what.
@@ -1291,7 +1300,10 @@ fn cmd_rerun(args: &[String]) -> i32 {
         }
     };
     let output = parsed.output.unwrap_or_else(|| {
-        PathBuf::from(rerun_output_path(&log.output_name, recipe.export_preset))
+        PathBuf::from(rerun_output_path(
+            &log.output_name,
+            recipe.output_extension(),
+        ))
     });
     let report = match run_render("rerun", &recipe, &input, &output, None) {
         Ok(r) => r,
@@ -1794,6 +1806,174 @@ fn cmd_split(args: &[String]) -> i32 {
     cmd_batch(&[manifest.display().to_string()])
 }
 
+const CONVERT_USAGE: &str =
+    "reeldeck convert <file> (--settings <profile.json> | --container <mp4|mov|mkv|avi>) \
+     [--video <h264|h265|mpeg4|prores|ffv1>] [--audio <aac|mp3|pcm16|flac|none>] [--size <W>x<H>] \
+     [--fps <rate>] [--video-bitrate <kbps>] [--audio-bitrate <kbps>] [--out <file>]";
+
+struct ConvertArgs {
+    input: PathBuf,
+    settings: rd_core::OutputSettings,
+    out: Option<PathBuf>,
+}
+
+/// `1280x720` → (1280, 720).
+fn parse_size(raw: &str) -> Option<(u32, u32)> {
+    let (w, h) = raw.split_once(['x', 'X'])?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
+fn parse_convert_args(args: &[String]) -> Result<ConvertArgs, u8> {
+    let fail = |msg: String| {
+        eprintln!("reeldeck convert: {msg}");
+        eprintln!("usage: {CONVERT_USAGE}");
+        2u8
+    };
+    let mut input = None;
+    let mut profile: Option<PathBuf> = None;
+    let mut container = None;
+    let mut video = None;
+    let mut audio = None;
+    let mut size = None;
+    let mut fps = None;
+    let mut video_bitrate = None;
+    let mut audio_bitrate = None;
+    let mut out = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        let mut value = || {
+            i += 1;
+            args.get(i)
+                .cloned()
+                .ok_or_else(|| fail(format!("missing value for {arg}")))
+        };
+        let bad = |what: &str, v: &str| fail(format!("{arg} expects {what}, got '{v}'"));
+        match arg {
+            "--settings" => profile = Some(PathBuf::from(value()?)),
+            "--container" => {
+                let v = value()?;
+                container = Some(
+                    rd_core::Container::parse(&v).ok_or_else(|| bad("mp4, mov, mkv or avi", &v))?,
+                );
+            }
+            "--video" => {
+                let v = value()?;
+                video = Some(
+                    rd_core::VideoCodec::parse(&v)
+                        .ok_or_else(|| bad("h264, h265, mpeg4, prores or ffv1", &v))?,
+                );
+            }
+            "--audio" => {
+                let v = value()?;
+                audio = Some(
+                    rd_core::AudioCodec::parse(&v)
+                        .ok_or_else(|| bad("aac, mp3, pcm16, flac or none", &v))?,
+                );
+            }
+            "--size" => {
+                let v = value()?;
+                size = Some(parse_size(&v).ok_or_else(|| bad("<width>x<height>", &v))?);
+            }
+            "--fps" => {
+                let v = value()?;
+                fps = Some(
+                    rd_core::Rate::parse(&v)
+                        .ok_or_else(|| bad("a rate such as 25 or 30000/1001", &v))?,
+                );
+            }
+            "--video-bitrate" => {
+                let v = value()?;
+                video_bitrate = Some(
+                    v.parse::<u32>()
+                        .map_err(|_| bad("kbit/s as a whole number", &v))?,
+                );
+            }
+            "--audio-bitrate" => {
+                let v = value()?;
+                audio_bitrate = Some(
+                    v.parse::<u32>()
+                        .map_err(|_| bad("kbit/s as a whole number", &v))?,
+                );
+            }
+            "--out" => out = Some(PathBuf::from(value()?)),
+            flag if flag.starts_with("--") => return Err(fail(format!("unknown flag '{flag}'"))),
+            _ if input.is_some() => return Err(fail(format!("unexpected extra argument '{arg}'"))),
+            _ => input = Some(PathBuf::from(arg)),
+        }
+        i += 1;
+    }
+    let input = input.ok_or_else(|| fail("name the source file".to_string()))?;
+    let mut settings = match (&profile, container) {
+        (Some(path), _) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| fail(format!("cannot read {}: {e}", path.display())))?;
+            let mut s = rd_core::OutputSettings::from_json(&text)
+                .map_err(|e| fail(format!("{} is not an output profile: {e}", path.display())))?;
+            if let Some(c) = container {
+                s.container = c;
+            }
+            s
+        }
+        (None, Some(c)) => rd_core::OutputSettings::for_container(c),
+        (None, None) => return Err(fail(
+            "choose the output: --settings <profile.json>, or --container with any other settings"
+                .to_string(),
+        )),
+    };
+    if let Some(v) = video {
+        settings.video_codec = v;
+    }
+    if let Some(a) = audio {
+        settings.audio_codec = a;
+    }
+    if size.is_some() {
+        settings.size = size;
+    }
+    if fps.is_some() {
+        settings.frame_rate = fps;
+    }
+    if video_bitrate.is_some() {
+        settings.video_bitrate_kbps = video_bitrate;
+    }
+    if audio_bitrate.is_some() {
+        settings.audio_bitrate_kbps = audio_bitrate;
+    }
+    settings.validate().map_err(|e| fail(e.to_string()))?;
+    Ok(ConvertArgs {
+        input,
+        settings,
+        out,
+    })
+}
+
+fn cmd_convert(args: &[String]) -> i32 {
+    let parsed = match parse_convert_args(args) {
+        Ok(p) => p,
+        Err(c) => return c as i32,
+    };
+    let sha = match hash_source("convert", &parsed.input) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let mut recipe = rd_core::Recipe::convert(parsed.input.display().to_string(), parsed.settings);
+    recipe.source_sha256 = Some(sha);
+    recipe.notes = "written by reeldeck convert".to_string();
+    if let Err(e) = recipe.validate() {
+        eprintln!("reeldeck convert: {e}");
+        return 2;
+    }
+    let output = parsed.out.unwrap_or_else(|| {
+        let stem = parsed
+            .input
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "output".to_string());
+        PathBuf::from(format!("{stem}.converted.{}", recipe.output_extension()))
+    });
+    execute_run("convert", &recipe, &parsed.input, &output, None)
+}
+
 const JOIN_USAGE: &str =
     "reeldeck join <file> <file> [<file> …] (--lossless | --preset <preservation|mezzanine|access>) [--out <file>]";
 
@@ -2105,7 +2285,7 @@ fn print_batch_state(state: &rd_core::BatchState) {
 /// `capture.restored.mkv` -> `capture.restored.rerun.mkv`: the rerun
 /// is a new file beside the caller's working directory, visibly a
 /// rerun of the recorded output.
-fn rerun_output_path(output_name: &str, preset: rd_core::ExportPreset) -> String {
+fn rerun_output_path(output_name: &str, ext: &str) -> String {
     let path = Path::new(output_name);
     let stem = path
         .file_stem()
@@ -2114,26 +2294,26 @@ fn rerun_output_path(output_name: &str, preset: rd_core::ExportPreset) -> String
     let ext = path
         .extension()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| preset.extension().to_string());
+        .unwrap_or_else(|| ext.to_string());
     format!("{stem}.rerun.{ext}")
 }
 
 /// `clip.mkv` + PreservationMaster -> `clip.preview.mkv`.
-fn preview_output_path(input: &Path, preset: rd_core::ExportPreset) -> String {
+fn preview_output_path(input: &Path, ext: &str) -> String {
     let stem = input
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output".to_string());
-    format!("{stem}.preview.{}", preset.extension())
+    format!("{stem}.preview.{}", ext)
 }
 
 /// `capture.mkv` + PreservationMaster -> `capture.restored.mkv`.
-fn derived_output_path(source_name: &str, preset: rd_core::ExportPreset) -> String {
+fn derived_output_path(source_name: &str, ext: &str) -> String {
     let stem = Path::new(source_name)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output".to_string());
-    format!("{stem}.restored.{}", preset.extension())
+    format!("{stem}.restored.{}", ext)
 }
 
 #[cfg(test)]
@@ -2303,12 +2483,15 @@ mod tests {
         assert_eq!(
             preview_output_path(
                 Path::new("clip.mkv"),
-                rd_core::ExportPreset::PreservationMaster
+                rd_core::ExportPreset::PreservationMaster.extension()
             ),
             "clip.preview.mkv"
         );
         assert_eq!(
-            preview_output_path(Path::new("clip.mp4"), rd_core::ExportPreset::Access),
+            preview_output_path(
+                Path::new("clip.mp4"),
+                rd_core::ExportPreset::Access.extension()
+            ),
             "clip.preview.mp4"
         );
     }
@@ -2420,18 +2603,21 @@ mod tests {
         assert_eq!(
             rerun_output_path(
                 "capture.restored.mkv",
-                rd_core::ExportPreset::PreservationMaster
+                rd_core::ExportPreset::PreservationMaster.extension()
             ),
             "capture.restored.rerun.mkv"
         );
         // Only the file name matters; a recorded directory is not
         // carried into the caller's working directory.
         assert_eq!(
-            rerun_output_path("some/dir/clip.restored.mp4", rd_core::ExportPreset::Access),
+            rerun_output_path(
+                "some/dir/clip.restored.mp4",
+                rd_core::ExportPreset::Access.extension()
+            ),
             "clip.restored.rerun.mp4"
         );
         assert_eq!(
-            rerun_output_path("noext", rd_core::ExportPreset::Mezzanine),
+            rerun_output_path("noext", rd_core::ExportPreset::Mezzanine.extension()),
             "noext.rerun.mov"
         );
     }
@@ -2546,6 +2732,71 @@ mod tests {
     }
 
     #[test]
+    fn convert_args_build_and_check_settings() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let parsed = parse_convert_args(&args(&[
+            "in.mov",
+            "--container",
+            "avi",
+            "--size",
+            "640x480",
+            "--fps",
+            "25",
+            "--video-bitrate",
+            "2000",
+        ]))
+        .unwrap();
+        let s = parsed.settings;
+        assert_eq!(s.container, rd_core::Container::Avi);
+        assert_eq!(s.video_codec, rd_core::VideoCodec::Mpeg4, "AVI's default");
+        assert_eq!(s.size, Some((640, 480)));
+        assert_eq!(s.video_bitrate_kbps, Some(2000));
+        assert_eq!(
+            parse_convert_args(&args(&["in.mov"])).err(),
+            Some(2),
+            "an output must be chosen"
+        );
+        assert_eq!(
+            parse_convert_args(&args(&[
+                "in.mov",
+                "--container",
+                "mp4",
+                "--video",
+                "prores"
+            ]))
+            .err(),
+            Some(2),
+            "an incompatible combination is refused"
+        );
+        assert_eq!(
+            parse_convert_args(&args(&["in.mov", "--container", "webm"])).err(),
+            Some(2)
+        );
+        assert_eq!(parse_size("1920X1080"), Some((1920, 1080)));
+        assert_eq!(parse_size("1920"), None);
+    }
+
+    #[test]
+    fn shipped_profiles_are_valid() {
+        for (name, text) in [
+            ("web-mp4", include_str!("../../../profiles/web-mp4.json")),
+            ("web-720p", include_str!("../../../profiles/web-720p.json")),
+            (
+                "edit-prores",
+                include_str!("../../../profiles/edit-prores.json"),
+            ),
+            (
+                "legacy-avi",
+                include_str!("../../../profiles/legacy-avi.json"),
+            ),
+        ] {
+            let settings =
+                rd_core::OutputSettings::from_json(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(settings.validate().is_ok(), "{name}");
+        }
+    }
+
+    #[test]
     fn join_args_need_two_files_and_a_mode() {
         let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let ok =
@@ -2651,12 +2902,12 @@ mod tests {
         assert_eq!(
             derived_output_path(
                 "capture_1987.mkv",
-                rd_core::ExportPreset::PreservationMaster
+                rd_core::ExportPreset::PreservationMaster.extension()
             ),
             "capture_1987.restored.mkv"
         );
         assert_eq!(
-            derived_output_path("clip.mp4", rd_core::ExportPreset::Access),
+            derived_output_path("clip.mp4", rd_core::ExportPreset::Access.extension()),
             "clip.restored.mp4"
         );
     }

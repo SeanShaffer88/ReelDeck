@@ -96,7 +96,7 @@ leaves the disk.
 | `crates/rd-pipeline` | Planning: recipe → filter strings, two-pass stabilization plan, export argument vectors. Plans only; never executes. |
 | `crates/rd-run` | Execution: runs plans with FFmpeg (fixity gate, never-overwrite, measured progress, cancellation) and writes the recipe + export-log proof beside every output; runs resumable batches. |
 | `crates/rd-ui` | Interface state model and design system: workflow stages and gates, per-source chain state with undo/redo, chain editing and guards, timeline lanes/marks, formatting, preferences, commands, pre-export checks — plus a framework-neutral shell prototype. |
-| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `batch`, `cut`, `split`, `join`, `hash`, `version`. |
+| `crates/reeldeck` | The `reeldeck` CLI binary: `inspect`, `plan`, `export`, `preview`, `verify`, `rerun`, `batch`, `cut`, `split`, `join`, `convert`, `hash`, `version`. |
 
 ## Building from source
 
@@ -280,6 +280,31 @@ rate steady; the export log counts them.
 ```sh
 cargo run -p reeldeck -- join reel1.mp4 reel2.mp4 --lossless
 cargo run -p reeldeck -- join tape.avi clip.mov extra.asf --preset mezzanine --out joined.mov
+```
+
+`convert` re-encodes a file to the output settings you choose:
+container (MP4, MOV, MKV, AVI), video codec (H.264, H.265, MPEG-4,
+ProRes, FFV1), audio codec (AAC, MP3, PCM, FLAC, or none), and
+optionally picture size, frame rate, and video/audio bitrates. Without
+a bitrate, each codec uses a quality-based default. Settings can be
+saved as a profile for a device or platform and loaded with
+`--settings`; flags override the profile. Examples are in
+[`profiles/`](profiles/README.md).
+
+- A combination the container can't carry (ProRes in MP4, PCM audio in
+  MP4, …), a bitrate on a codec that isn't bitrate-controlled here, an
+  odd picture size, or an `--out` name whose extension disagrees with
+  the container is refused with the reason — never adjusted silently.
+- Before rendering, the encoders the plan needs are checked against the
+  installed FFmpeg build (an MP3 encoder, for example, is missing from
+  some builds).
+- A size change scales to exactly that size, and a frame-rate change
+  drops or repeats frames (nothing is interpolated); both are stated
+  before the run and recorded in the export log.
+
+```sh
+cargo run -p reeldeck -- convert tape.mkv --settings profiles/web-mp4.json
+cargo run -p reeldeck -- convert clip.mov --container avi --size 640x480 --fps 25 --video-bitrate 3000
 ```
 
 Recipes that use these edit fields are written as schema 2; schema-1

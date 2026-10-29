@@ -1,0 +1,9 @@
+{
+  "container": "avi",
+  "video_codec": "mpeg4",
+  "audio_codec": "pcm16",
+  "size": null,
+  "frame_rate": null,
+  "video_bitrate_kbps": 5000,
+  "audio_bitrate_kbps": null
+}

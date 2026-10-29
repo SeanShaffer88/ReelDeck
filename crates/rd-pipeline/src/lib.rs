@@ -41,6 +41,8 @@ pub enum PipelineError {
     JoinFactsUnknown(usize),
     #[error("these sources cannot be joined as they are: {0}")]
     JoinMismatch(String),
+    #[error("the output file name ends in .{got}, but the settings write a {expected} container; name it .{expected} or change the container")]
+    OutputExtension { expected: String, got: String },
 }
 
 /// Facts about one source that a recipe does not carry and some plans
@@ -196,7 +198,12 @@ fn fmt_secs(v: f64) -> String {
 pub fn expected_output_frames(recipe: &Recipe, source_frames: u64) -> Option<u64> {
     // A cut's length depends on the ranges and the source's rate, which
     // the frame count alone cannot give.
-    if !recipe.keep.is_empty() {
+    if !recipe.keep.is_empty()
+        || recipe
+            .output
+            .as_ref()
+            .is_some_and(|o| o.frame_rate.is_some())
+    {
         return None;
     }
     let mut frames = source_frames;
@@ -331,8 +338,160 @@ pub fn preset_args(preset: ExportPreset) -> Vec<String> {
         ],
         // Every stream, untouched.
         ExportPreset::StreamCopy => &["-map", "0", "-c", "copy"],
+        // Settings-driven; see `codec_args`.
+        ExportPreset::Custom => &[],
     };
     args.iter().map(|s| s.to_string()).collect()
+}
+
+/// Codec and container arguments for a recipe: the preset's, or for the
+/// custom intent, the ones its output settings describe.
+pub fn codec_args(recipe: &Recipe) -> Vec<String> {
+    match (&recipe.export_preset, &recipe.output) {
+        (ExportPreset::Custom, Some(settings)) => settings_args(settings),
+        (preset, _) => preset_args(*preset),
+    }
+}
+
+/// Encoder, rate, audio and muxer arguments for output settings. With no
+/// bitrate, each codec uses a quality-based default.
+fn settings_args(s: &rd_core::OutputSettings) -> Vec<String> {
+    use rd_core::{Container, VideoCodec};
+    let mut args: Vec<String> = vec!["-c:v".into(), s.video_codec.encoder().into()];
+    let bitrate = s.video_bitrate_kbps.map(|k| format!("{k}k"));
+    match s.video_codec {
+        VideoCodec::H264 | VideoCodec::H265 => {
+            match &bitrate {
+                Some(b) => args.extend(["-b:v".into(), b.clone()]),
+                None => {
+                    let crf = if s.video_codec == VideoCodec::H264 {
+                        "18"
+                    } else {
+                        "22"
+                    };
+                    args.extend(["-crf".into(), crf.into()]);
+                }
+            }
+            args.extend([
+                "-preset".into(),
+                "slow".into(),
+                "-pix_fmt".into(),
+                "yuv420p".into(),
+            ]);
+            if s.video_codec == VideoCodec::H265
+                && matches!(s.container, Container::Mp4 | Container::Mov)
+            {
+                // The tag players on Apple platforms expect for HEVC.
+                args.extend(["-tag:v".into(), "hvc1".into()]);
+            }
+        }
+        VideoCodec::Mpeg4 => match &bitrate {
+            Some(b) => args.extend(["-b:v".into(), b.clone()]),
+            None => args.extend(["-q:v".into(), "3".into()]),
+        },
+        VideoCodec::Prores => args.extend(
+            [
+                "-profile:v",
+                "3",
+                "-vendor",
+                "apl0",
+                "-pix_fmt",
+                "yuv422p10le",
+            ]
+            .iter()
+            .map(|a| a.to_string()),
+        ),
+        VideoCodec::Ffv1 => args.extend(
+            ["-level", "3", "-g", "1", "-slicecrc", "1"]
+                .iter()
+                .map(|a| a.to_string()),
+        ),
+    }
+    match s.audio_codec.encoder() {
+        None => args.push("-an".into()),
+        Some(encoder) => {
+            args.extend(["-c:a".into(), encoder.into()]);
+            if s.audio_codec.takes_bitrate() {
+                args.extend([
+                    "-b:a".into(),
+                    format!("{}k", s.audio_bitrate_kbps.unwrap_or(192)),
+                ]);
+            }
+        }
+    }
+    args.extend(["-f".into(), s.container.muxer().into()]);
+    args
+}
+
+/// The full video filter chain: the recipe's operations, then the output
+/// settings' scaling and frame-rate conversion. Empty when there is
+/// nothing to filter.
+fn video_chain(recipe: &Recipe) -> Result<String, PipelineError> {
+    let mut parts = Vec::new();
+    if !recipe.operations.is_empty() {
+        parts.push(filter_chain(recipe)?);
+    }
+    if let Some(settings) = &recipe.output {
+        if let Some((w, h)) = settings.size {
+            parts.push(format!("scale={w}:{h}"));
+        }
+        if let Some(rate) = settings.frame_rate {
+            parts.push(format!("fps={rate}"));
+        }
+    }
+    Ok(parts.join(","))
+}
+
+/// What the operator must know about a conversion before it runs.
+fn settings_notices(recipe: &Recipe) -> Vec<String> {
+    let Some(settings) = &recipe.output else {
+        return Vec::new();
+    };
+    let mut notices = Vec::new();
+    if let Some((w, h)) = settings.size {
+        notices.push(format!(
+            "the picture is scaled to exactly {w}x{h}; a size with a different aspect ratio from the source stretches it, and scaling interlaced material without deinterlacing first damages its fields"
+        ));
+    }
+    if let Some(rate) = settings.frame_rate {
+        notices.push(format!(
+            "the frame rate is converted to {rate} by dropping or repeating frames; no frames are interpolated"
+        ));
+    }
+    notices
+}
+
+/// Refuse an output name whose extension disagrees with the container
+/// the settings write.
+fn check_output_extension(recipe: &Recipe, output: &str) -> Result<(), PipelineError> {
+    let Some(settings) = &recipe.output else {
+        return Ok(());
+    };
+    let expected = settings.container.extension();
+    match std::path::Path::new(output).extension() {
+        Some(ext) if !ext.to_string_lossy().eq_ignore_ascii_case(expected) => {
+            Err(PipelineError::OutputExtension {
+                expected: expected.to_string(),
+                got: ext.to_string_lossy().into_owned(),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The encoders an argument vector asks for (`-c:v` / `-c:a` values
+/// other than `copy`), so an executor can check the FFmpeg build has them.
+pub fn encoders_in(args: &[String]) -> Vec<String> {
+    let mut encoders = Vec::new();
+    for pair in args.windows(2) {
+        if (pair[0] == "-c:v" || pair[0] == "-c:a")
+            && pair[1] != "copy"
+            && !encoders.contains(&pair[1])
+        {
+            encoders.push(pair[1].clone());
+        }
+    }
+    encoders
 }
 
 /// A complete, ready-to-run export plan: the exact argument vector, the
@@ -398,11 +557,8 @@ pub fn export_plan_with_facts(
     }
     let unknown = SourceFacts::default();
     let facts = facts.first().unwrap_or(&unknown);
-    let chain = if recipe.operations.is_empty() {
-        String::new()
-    } else {
-        filter_chain(recipe)?
-    };
+    check_output_extension(recipe, output)?;
+    let chain = video_chain(recipe)?;
     let stabilization = recipe.operations.iter().find_map(|op| match op {
         Operation::Stabilize { smoothing, .. } => Some(stabilization_plan(
             input,
@@ -419,7 +575,7 @@ pub fn export_plan_with_facts(
         return Err(PipelineError::LosslessMultiRange);
     }
 
-    let mut notices = Vec::new();
+    let mut notices = settings_notices(recipe);
     let mut args: Vec<String> = vec!["ffmpeg".to_string(), "-hide_banner".to_string()];
     match recipe.keep.as_slice() {
         [] => {
@@ -464,7 +620,7 @@ pub fn export_plan_with_facts(
             ));
         }
     }
-    args.extend(preset_args(recipe.export_preset));
+    args.extend(codec_args(recipe));
     if stream_copy && !recipe.keep.is_empty() {
         // Copied packets keep their original timestamps; shift them so
         // the output starts at zero instead of at the cut point.
@@ -533,12 +689,9 @@ fn join_plan(
         )));
     }
     let has_audio = audio[0];
-    let chain = if recipe.operations.is_empty() {
-        String::new()
-    } else {
-        filter_chain(recipe)?
-    };
-    let mut notices = Vec::new();
+    check_output_extension(recipe, output)?;
+    let chain = video_chain(recipe)?;
+    let mut notices = settings_notices(recipe);
     let mut args: Vec<String> = vec!["ffmpeg".to_string(), "-hide_banner".to_string()];
     let mut concat_list = None;
 
@@ -609,7 +762,7 @@ fn join_plan(
             "{n} sources are joined in order; only the first video and first audio stream of each are kept"
         ));
     }
-    args.extend(preset_args(recipe.export_preset));
+    args.extend(codec_args(recipe));
     args.push("-y".to_string());
     args.push(output.to_string());
     Ok(ExportPlan {
@@ -693,7 +846,12 @@ pub fn preview_plan(
             "duration must be a finite, positive number of seconds, got {duration_secs}"
         )));
     }
-    let chain = filter_chain(recipe)?;
+    recipe.validate()?;
+    check_output_extension(recipe, output)?;
+    let chain = video_chain(recipe)?;
+    if chain.is_empty() && recipe.export_preset != ExportPreset::Custom {
+        return Err(PipelineError::EmptyChain);
+    }
     if recipe.needs_stabilization_pass() {
         return Err(PipelineError::PreviewWithStabilization);
     }
@@ -706,10 +864,11 @@ pub fn preview_plan(
         input.to_string(),
         "-t".to_string(),
         fmt_secs(duration_secs),
-        "-vf".to_string(),
-        chain.clone(),
     ];
-    args.extend(preset_args(recipe.export_preset));
+    if !chain.is_empty() {
+        args.extend(["-vf".to_string(), chain.clone()]);
+    }
+    args.extend(codec_args(recipe));
     args.push("-y".to_string());
     args.push(output.to_string());
     Ok(ExportPlan {
@@ -719,7 +878,7 @@ pub fn preview_plan(
         filter_chain: chain,
         args,
         stabilization: None,
-        notices: Vec::new(),
+        notices: settings_notices(recipe),
         concat_list: None,
     })
 }
@@ -945,6 +1104,136 @@ mod tests {
             export_plan_with_facts(&stabilized, "a.mp4", "o.mp4", &[]),
             Err(PipelineError::StabilizationWithJoin)
         ));
+    }
+
+    fn convert_to(
+        container: rd_core::Container,
+        f: impl FnOnce(&mut rd_core::OutputSettings),
+    ) -> Recipe {
+        let mut settings = rd_core::OutputSettings::for_container(container);
+        f(&mut settings);
+        Recipe::convert("in.mov", settings)
+    }
+
+    #[test]
+    fn golden_convert_with_codec_defaults() {
+        let recipe = convert_to(rd_core::Container::Mp4, |_| {});
+        let plan = export_plan(&recipe, "in.mov", "out.mp4").expect("plan");
+        assert_eq!(
+            args(&plan),
+            "ffmpeg -hide_banner -i in.mov -c:v libx264 -crf 18 -preset slow -pix_fmt yuv420p \
+             -c:a aac -b:a 192k -f mp4 -y out.mp4"
+        );
+        assert_eq!(encoders_in(&plan.args), vec!["libx264", "aac"]);
+        assert!(plan.notices.is_empty());
+    }
+
+    #[test]
+    fn golden_convert_with_size_rate_and_bitrates() {
+        let recipe = convert_to(rd_core::Container::Avi, |s| {
+            s.size = Some((640, 480));
+            s.frame_rate = rd_core::Rate::parse("30000/1001");
+            s.video_bitrate_kbps = Some(2500);
+        });
+        let plan = export_plan(&recipe, "in.mov", "out.avi").expect("plan");
+        assert_eq!(
+            args(&plan),
+            "ffmpeg -hide_banner -i in.mov -vf scale=640:480,fps=30000/1001 -c:v mpeg4 -b:v 2500k \
+             -c:a pcm_s16le -f avi -y out.avi"
+        );
+        assert_eq!(plan.notices.len(), 2);
+        assert!(plan.notices[0].contains("scaled to exactly 640x480"));
+        assert!(plan.notices[1].contains("no frames are interpolated"));
+        assert_eq!(
+            expected_output_frames(&recipe, 100),
+            None,
+            "a rate change alters the count"
+        );
+    }
+
+    #[test]
+    fn golden_convert_prores_hevc_and_no_audio() {
+        let prores = convert_to(rd_core::Container::Mov, |s| {
+            s.video_codec = rd_core::VideoCodec::Prores;
+            s.audio_codec = rd_core::AudioCodec::None;
+        });
+        assert_eq!(
+            args(&export_plan(&prores, "in.mov", "out.mov").unwrap()),
+            "ffmpeg -hide_banner -i in.mov -c:v prores_ks -profile:v 3 -vendor apl0 \
+             -pix_fmt yuv422p10le -an -f mov -y out.mov"
+        );
+        let hevc = convert_to(rd_core::Container::Mp4, |s| {
+            s.video_codec = rd_core::VideoCodec::H265;
+            s.video_bitrate_kbps = Some(6000);
+            s.audio_bitrate_kbps = Some(128);
+        });
+        let joined = args(&export_plan(&hevc, "in.mov", "out.mp4").unwrap());
+        assert!(
+            joined.contains("-c:v libx265 -b:v 6000k -preset slow -pix_fmt yuv420p -tag:v hvc1"),
+            "{joined}"
+        );
+        assert!(joined.contains("-c:a aac -b:a 128k -f mp4"), "{joined}");
+    }
+
+    #[test]
+    fn conversions_carry_the_chain_and_cuts() {
+        let mut recipe = convert_to(rd_core::Container::Mkv, |s| s.size = Some((1280, 720)));
+        recipe.operations.push(Operation::Deinterlace {
+            engine: DeinterlaceEngine::Bwdif,
+            field_order: FieldOrder::TopFieldFirst,
+            output_rate: OutputRate::SendFrame,
+            only_flagged: false,
+        });
+        let recipe = recipe.keep_range(5.0, Some(15.0));
+        let joined = args(&export_plan(&recipe, "in.mov", "out.mkv").unwrap());
+        assert!(
+            joined.starts_with("ffmpeg -hide_banner -ss 5 -i in.mov -t 10 -vf bwdif=mode=send_frame:parity=tff:deint=all,scale=1280:720 -c:v libx264"),
+            "the chain runs before scaling: {joined}"
+        );
+        let preview = preview_plan(&recipe, "in.mov", "seg.mkv", 30.0, 5.0).unwrap();
+        assert!(args(&preview)
+            .contains("-vf bwdif=mode=send_frame:parity=tff:deint=all,scale=1280:720"));
+        assert_eq!(preview.notices.len(), 1);
+    }
+
+    #[test]
+    fn conversion_output_names_must_match_the_container() {
+        let recipe = convert_to(rd_core::Container::Mp4, |_| {});
+        match export_plan(&recipe, "in.mov", "out.mkv") {
+            Err(PipelineError::OutputExtension { expected, got }) => {
+                assert_eq!((expected.as_str(), got.as_str()), ("mp4", "mkv"));
+            }
+            other => panic!("expected OutputExtension, got {other:?}"),
+        }
+        assert!(
+            export_plan(&recipe, "in.mov", "OUT.MP4").is_ok(),
+            "case does not matter"
+        );
+        assert!(
+            export_plan(&recipe, "in.mov", "out").is_ok(),
+            "no extension: -f decides"
+        );
+    }
+
+    #[test]
+    fn encoders_are_read_from_any_plan() {
+        let plan = export_plan(
+            &deinterlace(DeinterlaceEngine::Bwdif, OutputRate::SendField, false),
+            "a.mkv",
+            "b.mkv",
+        )
+        .unwrap();
+        assert_eq!(encoders_in(&plan.args), vec!["ffv1", "flac"]);
+        let copy = export_plan(
+            &Recipe::new("a.mp4", ExportPreset::StreamCopy),
+            "a.mp4",
+            "b.mkv",
+        )
+        .unwrap();
+        assert!(
+            encoders_in(&copy.args).is_empty(),
+            "stream copy encodes nothing"
+        );
     }
 
     #[test]

@@ -39,6 +39,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Conversion with output settings. `rd-core` gains `OutputSettings`
+  (container, video codec, audio codec or none, optional size, frame
+  rate and bitrates) with a conservative compatibility table, and the
+  `Custom` export intent that carries them (recipe schema 2;
+  `Recipe::output_extension` gives the container's extension). The
+  planner builds encoder arguments from the settings (`codec_args`;
+  quality-based defaults without a bitrate, `-f` always explicit), runs
+  scaling and rate conversion after the restoration chain — so cuts,
+  joins and previews carry them — states what scaling and rate
+  conversion do in the plan's notices, and refuses an output name whose
+  extension disagrees with the container. The executor checks the
+  plan's encoders (`encoders_in`) against the installed FFmpeg build
+  before rendering (`RunError::EncoderUnavailable`). New CLI command
+  `reeldeck convert <file> (--settings <profile.json> | --container …)
+  [--video …] [--audio …] [--size WxH] [--fps …] [--video-bitrate …]
+  [--audio-bitrate …]`, with example profiles in `profiles/`. Derived
+  output names follow the recipe's container. No new dependency.
+
 - Joining files. Recipe schema 2 adds `join` (further sources in order,
   each pinned by SHA-256); the export log records every joined source's
   hash (`joined_sources`), and verify gains a sixth check,

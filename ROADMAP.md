@@ -60,13 +60,14 @@ engine, under the same proof rules (plan §3.7–§3.10).
   output, each source pinned by hash and re-verified; lossless when
   codecs and picture size match (`reeldeck join`). Conforming mismatched
   sizes or missing audio is not done yet — those joins are refused
-- Format conversion between containers and codecs, with resolution,
-  frame rate and bitrate/quality settings; incompatible combinations
-  refused with the reason
+- [x] Format conversion between containers and codecs, with resolution,
+  frame rate and bitrate settings and saved profiles; incompatible
+  combinations refused with the reason (`reeldeck convert`). Conversion
+  settings on cut/split/join outputs are not exposed in the CLI yet
 - Metadata editing (title, description, tags)
 - [x] Recipe schema 2 for edit operations; schema-1 recipes keep working
 - Lossless remux into another container (the stream-copy intent with no
-  ranges) exists; codec conversion with output settings does not yet
+  ranges) exists
 - Batch queue: copy settings across sources
 - Proxy media for scrubbing long captures
 - Chapter and attachment preservation for Matroska masters

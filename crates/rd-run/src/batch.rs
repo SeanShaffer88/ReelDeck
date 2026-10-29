@@ -426,7 +426,7 @@ fn default_output_name(recipe: &Recipe) -> String {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output".to_string());
-    format!("{stem}.restored.{}", recipe.export_preset.extension())
+    format!("{stem}.restored.{}", recipe.output_extension())
 }
 
 /// Two entries may not share an output, and no output may be an input

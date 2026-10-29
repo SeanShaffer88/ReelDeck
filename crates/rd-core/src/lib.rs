@@ -14,6 +14,7 @@
 pub mod batch;
 pub mod hash;
 pub mod log;
+pub mod output;
 pub mod recipe;
 pub mod verify;
 
@@ -23,6 +24,7 @@ pub use batch::{
 };
 pub use hash::{is_sha256_hex, sha256_digest, sha256_file, sha256_hex, Sha256};
 pub use log::{ExportLog, SourceRecord};
+pub use output::{AudioCodec, Container, OutputError, OutputSettings, Rate, VideoCodec};
 pub use recipe::{
     parse_time, CropRect, DeinterlaceEngine, DenoiseEngine, ExportPreset, FieldOrder, JoinPart,
     KeepRange, Operation, OutputRate, Recipe, RecipeError, MIN_RECIPE_SCHEMA_VERSION,

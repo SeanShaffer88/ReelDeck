@@ -192,11 +192,18 @@ order, with every parameter, re-runnable, and proved.
 - **Metadata and subtitles.** Container title, description and tags;
   subtitle tracks added from files or kept from the source. Metadata
   edits are recorded like any other operation.
-- **Conversion and output settings.** Any FFmpeg-supported container and
-  codec pair, with resolution, frame rate, bitrate or quality, and saved
-  output profiles for specific devices or platforms. A conversion the
-  chosen container cannot hold (for example a codec AVI cannot carry) is
-  refused with the reason, not substituted.
+- **Conversion and output settings.** The *custom* intent re-encodes to
+  the recipe's own output settings: container (MP4, MOV, MKV, AVI),
+  video codec (H.264, H.265, MPEG-4 Part 2, ProRes, FFV1), audio codec
+  (AAC, MP3, PCM, FLAC, or none), and optionally size, frame rate and
+  bitrates (quality-based defaults otherwise). Settings files are the
+  output profiles for specific devices or platforms. The compatibility
+  table is deliberately conservative: a combination the container
+  cannot hold is refused with the reason, not substituted. Encoders are
+  checked against the installed FFmpeg build before a run. Scaling is
+  to the exact size asked; rate conversion drops or repeats frames and
+  never interpolates; both are stated before the run and logged. A
+  custom export is never a Preservation Master.
 - **Timeline.** Multi-track timeline with preview, keyboard-first, every
   edit undoable. Automation: everything the GUI does, the CLI and batch
   manifests can do.
@@ -248,7 +255,8 @@ rd-pipeline   Filter-graph / VapourSynth-script planning, two-pass
 rd-ui         Shell state model (queue / viewer / chain / jobs); no
               framework code yet — see the GUI decision below
 reeldeck      CLI binary: inspect | plan | export | preview | verify |
-              rerun | batch | cut | split | join | hash | version
+              rerun | batch | cut | split | join | convert | hash |
+              version
 ```
 
 - **Engine:** FFmpeg (a pinned build; note that the stabilization library
